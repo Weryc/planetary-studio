@@ -1,0 +1,10 @@
+[package]
+name = "ps-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["tiff", "png", "jpeg"] }
+ps-core = { version = "0.1.0", path = "../ps-core" }
+thiserror = "2.0.21"

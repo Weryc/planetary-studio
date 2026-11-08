@@ -1,0 +1,584 @@
+//! User preferences (persisted between sessions) and the Settings window (⌘, / Ctrl+,).
+
+use crate::theme::{ACCENT, BORDER, SUCCESS, TEXT, TEXT_WEAK};
+use crate::widgets::{segmented, toggle};
+use eframe::egui::{self, RichText, Stroke};
+use egui_material_icons::MaterialIcon;
+use egui_material_icons::icons::*;
+use ps_core::analysis::ImageKind;
+use ps_core::pipeline::{LayerRole, Pipeline, Stage};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, channel};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Visibility {
+    /// Shown at the top of the panel.
+    Favorite,
+    Visible,
+    /// Not shown, and not applied.
+    Hidden,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModulePref {
+    pub stage: Stage,
+    pub visibility: Visibility,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Preferences {
+    /// In processing order.
+    pub modules: Vec<ModulePref>,
+    pub bxt_path: Option<PathBuf>,
+    /// Also apply the automatic sharpening and noise settings when opening a file (the
+    /// structural ones are always automatic).
+    pub auto_settings: bool,
+    /// Choose the structural settings (PSF, wavelet levels, noise method…) from the image
+    /// when opening it; off = generic starting values.
+    #[serde(default = "yes")]
+    pub auto_structure: bool,
+    /// Show only the modules that make sense for the image (no colour tools for mono images,
+    /// Mineral Moon only for the Moon…).
+    #[serde(default = "yes")]
+    pub adapt_to_image: bool,
+    /// Opening a card closes the others of its area.
+    #[serde(default = "yes")]
+    pub one_group_open: bool,
+    /// Open module cards (all closed by default).
+    pub expanded: HashSet<Stage>,
+    /// The area shown in the panel, by name.
+    pub current_area: String,
+    /// File format of quick exports (extension), the last one chosen.
+    pub export_format: String,
+    /// Added to the original's name when exporting next to it.
+    pub export_suffix: String,
+    /// The equipment last used (or read from a log), for the next images.
+    #[serde(default)]
+    pub setup: ps_core::equipment::Setup,
+    /// Keywords added to exported files' names.
+    #[serde(default = "default_keywords")]
+    pub export_keywords: Vec<crate::naming::NameKeyword>,
+    /// How the levels and curves histograms are drawn.
+    pub histogram_mode: crate::widgets::HistogramMode,
+    /// Folded thematic groups and layer sections, by name.
+    pub collapsed_sections: HashSet<String>,
+    /// Keep only the expensive processing steps in memory (off: keep as much as possible).
+    pub memory_saving: bool,
+    /// While a slider is dragged, preview at reduced resolution (approximate, but fluid).
+    pub fast_preview: bool,
+    /// How hard the automatic settings push.
+    /// Free or classic wavelet scales, as last chosen in the wavelet panel.
+    #[serde(default = "free_scales")]
+    pub wavelet_scales: ps_core::wavelet::ScaleMode,
+    pub auto_strength: ps_core::preset::AutoStrength,
+    /// Use the graphics card for the heavy processing when there is a suitable one.
+    #[serde(default = "yes")]
+    pub use_gpu: bool,
+    /// Format version, to migrate settings saved by older releases. Field-level default (0):
+    /// the container-level default would fill in the *current* version and skip migrations.
+    #[serde(default)]
+    pub version: u32,
+}
+
+const VERSION: u32 = 4;
+
+fn yes() -> bool {
+    true
+}
+
+/// Thematic areas of the side panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Group {
+    Favorites,
+    Sharpness,
+    Noise,
+    Tone,
+    Color,
+    Regions,
+    /// Not a group of modules: the equipment and diagnosis tab.
+    Instrument,
+    /// Not a group of modules: the export tab.
+    Export,
+}
+
+impl Group {
+    pub fn name(self) -> &'static str {
+        match self {
+            Group::Favorites => "Preferiti",
+            Group::Sharpness => "Nitidezza",
+            Group::Noise => "Rumore",
+            Group::Tone => "Curve e livelli",
+            Group::Color => "Colore",
+            Group::Regions => "Livelli",
+            Group::Instrument => "Strumento",
+            Group::Export => "Esporta",
+        }
+    }
+
+    pub fn icon(self) -> MaterialIcon {
+        match self {
+            Group::Favorites => ICON_STAR,
+            Group::Sharpness => ICON_DEBLUR,
+            Group::Noise => ICON_GRAIN,
+            Group::Tone => ICON_SHOW_CHART,
+            Group::Color => ICON_PALETTE,
+            Group::Regions => ICON_LAYERS,
+            Group::Instrument => ICON_PLANET,
+            Group::Export => ICON_IOS_SHARE,
+        }
+    }
+
+    fn of(stage: Stage) -> Group {
+        match stage {
+            Stage::Bxt | Stage::Deconv | Stage::Wavelet | Stage::Smart | Stage::Contrast | Stage::Dering => Group::Sharpness,
+            Stage::Denoise => Group::Noise,
+            Stage::Tone | Stage::Curves => Group::Tone,
+            Stage::Align | Stage::Color | Stage::Mineral => Group::Color,
+            Stage::Rings | Stage::Moons | Stage::Layers => Group::Regions,
+        }
+    }
+}
+
+/// Processing order: sharpen, clean, then tone and colour, then local work.
+pub const GROUP_ORDER: [Group; 5] = [Group::Sharpness, Group::Noise, Group::Tone, Group::Color, Group::Regions];
+
+/// Whether a module makes sense for this image.
+pub fn relevant(stage: Stage, kind: ImageKind, mono: bool) -> bool {
+    match stage {
+        Stage::Align | Stage::Color => !mono,
+        Stage::Mineral => !mono && matches!(kind, ImageKind::FullDisk | ImageKind::Surface),
+        Stage::Rings => kind == ImageKind::Saturn,
+        Stage::Moons => matches!(kind, ImageKind::Planet | ImageKind::Saturn),
+        _ => true,
+    }
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        use Visibility::*;
+        let modules = [
+            (Stage::Align, Visible),
+            (Stage::Bxt, Hidden),
+            (Stage::Deconv, Visible),
+            (Stage::Denoise, Visible),
+            (Stage::Wavelet, Visible),
+            (Stage::Smart, Visible),
+            (Stage::Contrast, Visible),
+            (Stage::Dering, Visible),
+            (Stage::Tone, Visible),
+            (Stage::Curves, Visible),
+            (Stage::Color, Visible),
+            (Stage::Rings, Visible),
+            (Stage::Moons, Visible),
+            (Stage::Layers, Visible),
+            (Stage::Mineral, Visible),
+        ]
+        .into_iter()
+        .map(|(stage, visibility)| ModulePref { stage, visibility })
+        .collect();
+        Self {
+            modules,
+            bxt_path: ps_core::bxt::find_executable(),
+            auto_settings: false,
+            auto_structure: true,
+            adapt_to_image: true,
+            one_group_open: true,
+            expanded: HashSet::new(),
+            current_area: Group::Sharpness.name().to_string(),
+            export_format: "tif".into(),
+            export_suffix: "_ps".into(),
+            export_keywords: default_keywords(),
+            setup: Default::default(),
+            histogram_mode: Default::default(),
+            collapsed_sections: HashSet::new(),
+            memory_saving: false,
+            fast_preview: false,
+            auto_strength: Default::default(),
+            wavelet_scales: free_scales(),
+            use_gpu: true,
+            version: VERSION,
+        }
+    }
+}
+
+pub fn stage_icon(stage: Stage) -> MaterialIcon {
+    match stage {
+        Stage::Align => ICON_CENTER_FOCUS_STRONG,
+        Stage::Bxt => ICON_AUTO_AWESOME,
+        Stage::Deconv => ICON_DEBLUR,
+        Stage::Denoise => ICON_GRAIN,
+        Stage::Wavelet => ICON_WAVES,
+        Stage::Smart => ICON_MAGIC_BUTTON,
+        Stage::Contrast => ICON_CONTRAST,
+        Stage::Dering => ICON_FLARE,
+        Stage::Tone => ICON_TUNE,
+        Stage::Curves => ICON_SHOW_CHART,
+        Stage::Color => ICON_PALETTE,
+        Stage::Layers => ICON_LAYERS,
+        Stage::Mineral => ICON_NIGHTLIGHT,
+        Stage::Rings => ICON_ORBIT,
+        Stage::Moons => ICON_BUBBLE_CHART,
+    }
+}
+
+impl Preferences {
+    /// Preferences saved by an older version lack newer modules: add them, in processing order.
+    pub fn upgraded(mut self) -> Self {
+        if self.version < 2 {
+            // Version 1 applied every automatic setting on open; now that is opt-in.
+            self.auto_settings = false;
+            self.adapt_to_image = true;
+        }
+        if self.version < 3 {
+            // Deconvolution and wavelets were favourites; they now live in "Nitidezza".
+            self.modules.iter_mut().filter(|m| m.visibility == Visibility::Favorite).for_each(|m| m.visibility = Visibility::Visible);
+            if let Some(m) = self.modules.iter_mut().find(|m| m.stage == Stage::Mineral) {
+                // Shown only for the Moon now, so it no longer clutters other images.
+                m.visibility = Visibility::Visible;
+            }
+            self.one_group_open = true;
+        }
+        self.version = VERSION;
+        let defaults = Preferences::default().modules;
+        let missing: Vec<ModulePref> = defaults.iter().filter(|d| !self.modules.iter().any(|m| m.stage == d.stage)).cloned().collect();
+        self.modules.extend(missing);
+        let order = |s: Stage| defaults.iter().position(|d| d.stage == s).unwrap_or(usize::MAX);
+        self.modules.sort_by_key(|m| order(m.stage));
+        self
+    }
+
+    /// Shown in the panel for this image: not hidden and, if adapting, relevant.
+    fn shown(&self, stage: Stage, kind: ImageKind, mono: bool) -> bool {
+        self.visibility(stage) != Visibility::Hidden && (!self.adapt_to_image || relevant(stage, kind, mono))
+    }
+
+    pub fn visibility(&self, stage: Stage) -> Visibility {
+        self.modules.iter().find(|m| m.stage == stage).map_or(Visibility::Visible, |m| m.visibility)
+    }
+
+    fn set_visibility(&mut self, stage: Stage, v: Visibility) {
+        if let Some(m) = self.modules.iter_mut().find(|m| m.stage == stage) {
+            m.visibility = v;
+        }
+    }
+
+    /// Panel layout: favourites first, then the other visible modules by thematic group,
+    /// each in processing order. Empty groups are left out.
+    pub fn panel_layout(&self, kind: ImageKind, mono: bool) -> Vec<(Group, Vec<Stage>)> {
+        let shown = |m: &&ModulePref| self.shown(m.stage, kind, mono);
+        let favorites: Vec<Stage> = self.modules.iter().filter(shown).filter(|m| m.visibility == Visibility::Favorite).map(|m| m.stage).collect();
+        let mut out = Vec::new();
+        if !favorites.is_empty() {
+            out.push((Group::Favorites, favorites));
+        }
+        for group in GROUP_ORDER {
+            let stages: Vec<Stage> = self.modules.iter().filter(shown).filter(|m| m.visibility == Visibility::Visible && Group::of(m.stage) == group).map(|m| m.stage).collect();
+            if !stages.is_empty() {
+                out.push((group, stages));
+            }
+        }
+        out
+    }
+
+    /// The pipeline actually processed: modules not shown are switched off.
+    pub fn effective(&self, p: &Pipeline, kind: ImageKind, mono: bool) -> Pipeline {
+        let mut p = p.clone();
+        for m in self.modules.iter().filter(|m| !self.shown(m.stage, kind, mono)) {
+            match m.stage {
+                Stage::Align => p.align.enabled = false,
+                Stage::Bxt => p.bxt.enabled = false,
+                Stage::Deconv => p.deconv.enabled = false,
+                Stage::Denoise => {
+                    p.denoise.enabled = false;
+                    p.layers.iter_mut().for_each(|l| l.denoise.enabled = false);
+                }
+                Stage::Wavelet => {
+                    p.wavelet.enabled = false;
+                    p.layers.iter_mut().for_each(|l| l.wavelet.enabled = false);
+                }
+                Stage::Smart => p.smart.enabled = false,
+                Stage::Contrast => {
+                    p.contrast.enabled = false;
+                    p.layers.iter_mut().for_each(|l| l.contrast.enabled = false);
+                }
+                Stage::Tone => {
+                    p.tone.enabled = false;
+                    p.layers.iter_mut().for_each(|l| l.tone.enabled = false);
+                }
+                Stage::Curves => p.curves.enabled = false,
+                Stage::Color => {
+                    p.color.enabled = false;
+                    p.layers.iter_mut().for_each(|l| l.color.enabled = false);
+                }
+                Stage::Layers => p.layers.iter_mut().for_each(|l| l.enabled = false),
+                Stage::Mineral => p.mineral.enabled = false,
+                Stage::Dering => p.dering.enabled = false,
+                Stage::Rings | Stage::Moons => {
+                    let role = if m.stage == Stage::Rings { LayerRole::Rings } else { LayerRole::Moons };
+                    p.layers.iter_mut().filter(|l| l.role == Some(role)).for_each(|l| l.enabled = false);
+                }
+            }
+        }
+        p
+    }
+
+    pub fn bxt_executable(&self) -> Option<PathBuf> {
+        self.bxt_path.clone().filter(|p| p.is_file())
+    }
+}
+
+/// State of the open Settings window.
+#[derive(Default)]
+pub struct SettingsWindow {
+    pub open: bool,
+    check: Option<Receiver<Result<String, String>>>,
+    check_result: Option<Result<String, String>>,
+}
+
+impl SettingsWindow {
+    pub fn show(&mut self, ctx: &egui::Context, prefs: &mut Preferences) {
+        if !self.open {
+            return;
+        }
+        if let Some(rx) = &self.check
+            && let Ok(result) = rx.try_recv()
+        {
+            self.check_result = Some(result);
+            self.check = None;
+        }
+        let frame = egui::Frame::new().fill(crate::theme::PANEL).corner_radius(12).inner_margin(20).stroke(Stroke::new(1.0, BORDER));
+        let response = egui::Modal::new(egui::Id::unique("settings")).frame(frame).show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.horizontal(|ui| {
+                ui.label(ICON_SETTINGS.rich_text().size(20.0).color(ACCENT));
+                ui.label(RichText::new("Impostazioni").size(17.0).strong().color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::widgets::icon_button(ui, ICON_CLOSE, "Chiudi (Esc)").clicked() {
+                        self.open = false;
+                    }
+                });
+            });
+            ui.add_space(10.0);
+            // Taller than small windows: scroll, keeping the title in view.
+            let max_height = (ctx.content_rect().height() - 140.0).max(200.0);
+            egui::ScrollArea::vertical().max_height(max_height).min_scrolled_height(max_height.min(720.0)).auto_shrink([false, true]).show(ui, |ui| {
+                self.modules_section(ui, prefs);
+                ui.add_space(14.0);
+                self.bxt_section(ui, prefs);
+                ui.add_space(14.0);
+                section(ui, "APERTURA DELLE IMMAGINI");
+                ui.horizontal(|ui| {
+                    toggle(ui, &mut prefs.auto_structure);
+                    ui.label("Scegli le impostazioni avanzate (PSF, livelli, kernel…) in base all'immagine");
+                });
+                ui.horizontal(|ui| {
+                    toggle(ui, &mut prefs.auto_settings);
+                    ui.label("Applica subito anche nitidezza e riduzione del rumore automatiche");
+                });
+                ui.horizontal(|ui| {
+                    toggle(ui, &mut prefs.adapt_to_image);
+                    ui.label("Mostra solo i moduli adatti all'immagine aperta");
+                });
+                ui.add_space(14.0);
+                section(ui, "PRESTAZIONI");
+                ui.horizontal(|ui| {
+                    toggle(ui, &mut prefs.use_gpu);
+                    ui.label("Usa la scheda grafica (GPU)");
+                });
+                hint(
+                    ui,
+                    &match ps_core::gpu::status() {
+                        None => "Ricerca della GPU in corso…".to_string(),
+                        Some(None) => "Nessuna GPU utilizzabile: si usa il processore.".to_string(),
+                        Some(Some(gpu)) if gpu.shared_memory => format!(
+                            "{}: deconvoluzione, riduzione del rumore, wavelet, contrasto, dering e maschere. Il risultato è lo stesso del processore.",
+                            gpu.name
+                        ),
+                        Some(Some(gpu)) => format!(
+                            "{}: deconvoluzione e riduzione del rumore Luna e Sole. Le operazioni leggere restano sul processore: su una scheda separata trasferire l'immagine costerebbe quanto calcolarla. Il risultato è lo stesso.",
+                            gpu.name
+                        ),
+                    },
+                );
+                ui.horizontal(|ui| {
+                    toggle(ui, &mut prefs.fast_preview);
+                    ui.label("Anteprima rapida mentre muovi un cursore");
+                });
+                hint(ui, "Durante il trascinamento elabora l'immagine ridotta (approssimata); al rilascio torna a piena risoluzione.");
+                ui.horizontal(|ui| {
+                    toggle(ui, &mut prefs.memory_saving);
+                    ui.label("Risparmia memoria");
+                });
+                hint(ui, "Tiene in memoria solo i passi lenti (deconvoluzione, rumore, wavelet…) e ricalcola quelli rapidi. Utile con immagini grandi e poca RAM.");
+                ui.add_space(14.0);
+                section(ui, "PANNELLO");
+                ui.horizontal(|ui| {
+                    toggle(ui, &mut prefs.one_group_open);
+                    ui.label("Tieni aperta una sola scheda alla volta");
+                });
+            });
+        });
+        if response.should_close() {
+            self.open = false;
+        }
+    }
+
+    fn modules_section(&mut self, ui: &mut egui::Ui, prefs: &mut Preferences) {
+        section(ui, "MODULI DEL PANNELLO");
+        ui.label(RichText::new("I preferiti stanno in cima; i moduli nascosti non vengono né mostrati né applicati.").small().color(TEXT_WEAK));
+        ui.add_space(6.0);
+        let stages: Vec<Stage> = prefs.modules.iter().map(|m| m.stage).collect();
+        ui.spacing_mut().item_spacing.y = 4.0;
+        for stage in stages {
+            ui.horizontal(|ui| {
+                ui.label(stage_icon(stage).rich_text().size(18.0).color(TEXT_WEAK));
+                ui.label(RichText::new(stage.name()).color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut v = prefs.visibility(stage);
+                    let options = [
+                        (Visibility::Favorite, Some(ICON_STAR), "Preferito"),
+                        (Visibility::Visible, Some(ICON_VISIBILITY), "Visibile"),
+                        (Visibility::Hidden, Some(ICON_VISIBILITY_OFF), "Nascosto"),
+                    ];
+                    if segmented(ui, &mut v, &options) {
+                        prefs.set_visibility(stage, v);
+                    }
+                });
+            });
+        }
+    }
+
+    fn bxt_section(&mut self, ui: &mut egui::Ui, prefs: &mut Preferences) {
+        section(ui, "BLURXTERMINATOR");
+        let mut enabled = prefs.visibility(Stage::Bxt) != Visibility::Hidden;
+        ui.horizontal(|ui| {
+            if toggle(ui, &mut enabled).changed() {
+                prefs.set_visibility(Stage::Bxt, if enabled { Visibility::Visible } else { Visibility::Hidden });
+            }
+            ui.label("Usa BlurXTerminator (strumento a riga di comando rc-astro)");
+        });
+        ui.label(
+            RichText::new("Richiede il tool stand-alone di RC Astro e una licenza attiva di BlurXTerminator.")
+                .small()
+                .color(TEXT_WEAK),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let path = prefs.bxt_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "non trovato".into());
+            ui.label(RichText::new("Eseguibile").color(TEXT_WEAK));
+            ui.add(egui::Label::new(RichText::new(path).monospace().small()).truncate());
+        });
+        ui.horizontal(|ui| {
+            if ui.button((ICON_SEARCH.rich_text(), "Cerca automaticamente")).clicked() {
+                prefs.bxt_path = ps_core::bxt::find_executable();
+                self.check_result = prefs.bxt_path.is_none().then(|| Err("rc-astro non trovato: indicalo con Sfoglia".to_string()));
+            }
+            if ui.button((ICON_FOLDER_OPEN.rich_text(), "Sfoglia…")).clicked()
+                && let Some(p) = rfd::FileDialog::new().set_title("Seleziona l'eseguibile rc-astro").pick_file()
+            {
+                prefs.bxt_path = Some(p);
+                self.check_result = None;
+            }
+            let can_check = self.check.is_none() && prefs.bxt_executable().is_some();
+            if ui.add_enabled(can_check, egui::Button::new((ICON_VERIFIED.rich_text(), "Verifica"))).clicked()
+                && let Some(exe) = prefs.bxt_executable()
+            {
+                let (tx, rx) = channel();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    tx.send(ps_core::bxt::check(&exe)).ok();
+                    ctx.request_repaint();
+                });
+                self.check = Some(rx);
+                self.check_result = None;
+            }
+            if self.check.is_some() {
+                ui.add(egui::Spinner::new().size(14.0).color(ACCENT));
+            }
+        });
+        match &self.check_result {
+            Some(Ok(text)) => {
+                ui.horizontal(|ui| {
+                    ui.label(ICON_CHECK_CIRCLE.rich_text().color(SUCCESS));
+                    ui.label(RichText::new(first_lines(text)).small().color(SUCCESS));
+                });
+            }
+            Some(Err(text)) => {
+                ui.label(RichText::new(first_lines(text)).small().color(ui.visuals().error_fg_color));
+            }
+            None => {}
+        }
+    }
+}
+
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.label(RichText::new(title).small().strong().color(TEXT_WEAK));
+    ui.add_space(4.0);
+}
+
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).small().color(TEXT_WEAK)).wrap());
+}
+
+fn first_lines(text: &str) -> String {
+    text.lines().take(3).collect::<Vec<_>>().join("\n")
+}
+
+fn free_scales() -> ps_core::wavelet::ScaleMode {
+    ps_core::wavelet::ScaleMode::Free
+}
+
+fn default_keywords() -> Vec<crate::naming::NameKeyword> {
+    vec![crate::naming::NameKeyword::Suffix]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(p: &Preferences, kind: ImageKind, mono: bool) -> Vec<Stage> {
+        p.panel_layout(kind, mono).into_iter().flat_map(|(_, s)| s).collect()
+    }
+
+    #[test]
+    fn panel_adapts_to_the_image() {
+        let mut p = Preferences::default();
+        p.modules.iter_mut().for_each(|m| m.visibility = Visibility::Visible);
+        let mono = shown(&p, ImageKind::Planet, true);
+        assert!(!mono.contains(&Stage::Color) && !mono.contains(&Stage::Align) && !mono.contains(&Stage::Mineral));
+        assert!(mono.contains(&Stage::Tone), "levels and curves still make sense in mono");
+        assert!(!shown(&p, ImageKind::Saturn, false).contains(&Stage::Mineral));
+        assert!(shown(&p, ImageKind::FullDisk, false).contains(&Stage::Mineral));
+        p.adapt_to_image = false;
+        assert!(shown(&p, ImageKind::Planet, true).contains(&Stage::Color));
+    }
+
+    #[test]
+    fn groups_follow_processing_order() {
+        let mut p = Preferences::default();
+        p.modules.iter_mut().for_each(|m| m.visibility = Visibility::Visible);
+        let layout = p.panel_layout(ImageKind::Planet, false);
+        assert_eq!(layout[0].0, Group::Sharpness, "sharpening comes first");
+        let color = layout.iter().find(|(g, _)| *g == Group::Color).unwrap();
+        assert!(color.1.contains(&Stage::Align) && !color.1.contains(&Stage::Tone), "tone and colour are separate");
+    }
+
+    #[test]
+    fn old_preferences_stop_auto_applying() {
+        let old = Preferences { auto_settings: true, version: 0, ..Default::default() };
+        assert!(!old.upgraded().auto_settings);
+    }
+
+    /// The bug behind "everything was already on": a saved file without `version` must read
+    /// as version 0, not as the current one.
+    #[test]
+    fn missing_version_reads_as_old() {
+        let json = r#"{"auto_settings": true}"#;
+        let p: Preferences = serde_json::from_str(json).unwrap();
+        assert_eq!(p.version, 0);
+        assert!(!p.upgraded().auto_settings);
+    }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "ps-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "persistence"] }
+egui_material_icons = "0.9.0"
+ps-core = { version = "0.1.0", path = "../ps-core" }
+ps-io = { version = "0.1.0", path = "../ps-io" }
+rayon = "1.12.0"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["eframe", "wgpu", "snapshot"] }
+
+[build-dependencies]
+winresource = "0.1.34"
