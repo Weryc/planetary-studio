@@ -178,11 +178,9 @@ pub fn wavelet_structure(kind: ImageKind, analysis: &Analysis, scales: ScaleMode
     }
 }
 
-/// Deringing neighbourhood and limb band from the blur; Saturn gets a wider tolerance so the
-/// Cassini division and the ring edges, genuine sharp detail, keep their contrast.
+/// Deconvolution's anti-ringing area (kept with the deringing settings) from the blur.
 pub fn dering_structure(kind: ImageKind, analysis: &Analysis) -> DeringParams {
     let mut d = DeringParams::for_blur(blur_core(kind, analysis));
-    d.tolerance = if kind == ImageKind::Saturn { 0.15 } else { 0.1 };
     // On Saturn the ring edges and divisions are real sharp detail: the globe's limb only.
     d.region = if kind == ImageKind::Saturn { DeringRegion::Globe } else { DeringRegion::Subject };
     d
@@ -335,7 +333,8 @@ pub fn auto_pipeline_with(kind: ImageKind, analysis: &Analysis, strength: AutoSt
         deconv: Module::on(deconv),
         denoise: Module::on(NoiseParams { strength: b.noise.strength * noise * cleaning, ..b.noise }),
         wavelet: Module::on(wavelet),
-        dering: Module { enabled: has_limb(kind), params: dering_structure(kind, analysis) },
+        // It does nothing until the user paints over a ring.
+        dering: Module::on(dering_structure(kind, analysis)),
         ..Default::default()
     }
 }
@@ -410,7 +409,8 @@ fn nothing_applied(p: Pipeline) -> Pipeline {
         wavelet: Module::on(WaveletParams { layers: vec![WaveletLayer::default(); p.wavelet.params.layers.len()], amplify: 1.0, grain_denoise: 0.0, ..p.wavelet.params }),
         smart: Module::on(crate::smart::SmartParams { strength: 0.0, ..p.smart.params }),
         contrast: Module::on(ContrastParams { amount: 0.0, local_amount: 0.0, ..d.contrast.params }),
-        dering: Module::on(DeringParams { strength: 0.0, ..p.dering.params }),
+        // Neutral until a ring is painted.
+        dering: Module::on(p.dering.params),
         tone: Module::on(ToneParams::default()),
         curves: Module::on(ToneParams::default()),
         color: Module::on(ColorParams::default()),
@@ -573,21 +573,10 @@ pub fn explain(kind: ImageKind, analysis: &Analysis, scales: ScaleMode) -> Expla
         "Diametro PSF {:.1} px: è la FWHM della sfocatura misurata (2,355 × σ). La stima automatica di BlurXTerminator usa le stelle, che in queste immagini non ci sono.",
         (2.3548 * blur_core(kind, analysis)).clamp(0.5, 8.0)
     )];
-    let d = dering_structure(kind, analysis);
-    let mut dering = vec![format!(
-        "Larghezza aloni {} px, dalla sfocatura (σ {:.1} px): le bande chiare e scure che la nitidezza crea accanto a un bordo netto stanno entro pochi σ da esso.",
-        d.radius,
-        blur_core(kind, analysis)
-    )];
-    dering.push("Agisce solo vicino ai bordi netti dell'originale (bordo del pianeta, anelli): bande e dettagli fini hanno poco contrasto locale e non vengono toccati.".into());
-    if kind == ImageKind::Saturn {
-        dering.push("Solo sul globo, compresi gli anelli che gli passano davanti: i bordi degli anelli all'esterno e la divisione di Cassini sono dettagli netti veri e verrebbero smorzati. Si può cambiare in \"Dove agisce\".".into());
-    }
-    dering.push(if kind == ImageKind::Saturn {
-        format!("Tolleranza {:.0} %, più alta: la divisione di Cassini e i bordi degli anelli sono dettagli netti veri e non vanno smorzati.", d.tolerance * 100.0)
-    } else {
-        format!("Tolleranza {:.0} %: la deconvoluzione può superare di poco i valori originali vicini; oltre è quasi sempre ringing.", d.tolerance * 100.0)
-    });
+    let dering = vec![
+        "Non cerca l'anello da solo: dipingilo con il pennello, largo più o meno quanto l'anello. Sotto la pennellata misura quanto è largo e dove sta, e lo riempie fino al livello di ciò che ha accanto.".into(),
+        "Un bordo netto (il lembo, l'orlo di un cratere), una banda più larga dell'anello e tutto ciò che sta fuori dalla pennellata non vengono toccati.".into(),
+    ];
     Explanation { deconv, wavelet, denoise, bxt, dering }
 }
 
@@ -628,7 +617,7 @@ fn with_structure(current: &Pipeline, structure: &Pipeline) -> Pipeline {
     (m.cutoff, m.peak, m.limb_protection, m.include_sky) = (s.cutoff, s.peak, s.limb_protection, s.include_sky);
     p.align.params = structure.align.params;
     let (own, d) = (&mut p.dering.params, &structure.dering.params);
-    (own.radius, own.edges, own.tolerance, own.region) = (d.radius, d.edges, d.tolerance, d.region);
+    (own.radius, own.edges, own.region) = (d.radius, d.edges, d.region);
     p
 }
 
@@ -652,6 +641,7 @@ mod tests {
             spectral: None,
             power: Vec::new(),
             optics: None,
+            planet: None,
         }
     }
 
@@ -799,11 +789,10 @@ mod tests {
     }
 
     #[test]
-    fn dering_follows_the_blur_and_skips_surfaces() {
+    fn dering_follows_the_blur_and_waits_for_the_brush() {
         let a = analysis(ImageKind::Planet, 100.0, Some(3.0));
         let d = auto_pipeline(ImageKind::Planet, &a).dering;
-        assert!(d.enabled && d.params.radius >= 2);
-        assert!(!auto_pipeline(ImageKind::Surface, &a).dering.enabled);
+        assert!(d.enabled && d.params.radius >= 2 && d.params.is_neutral());
         assert!(initial_pipeline(ImageKind::Planet, &a, ScaleMode::Free).dering.params.is_neutral());
         assert_eq!(initial_pipeline(ImageKind::Saturn, &a, ScaleMode::Free).dering.params.region, DeringRegion::Globe);
     }

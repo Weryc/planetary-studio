@@ -9,8 +9,8 @@
 //! ```
 //! Deconvolution is shared: the blur is the same everywhere. Each layer re-runs the finishing
 //! chain on the deconvolved image, with its own settings for the modules it overrides and the
-//! global ones for the rest, and is blended over the base through its mask. Deringing compares
-//! with the image before any sharpening (after RGB alignment) and uses the global settings.
+//! global ones for the rest, and is blended over the base through its mask. Deringing lifts the
+//! ring the user painted over ([`RING_MASK`]) and uses the global settings.
 
 use crate::Image;
 use crate::adjust::{ColorParams, MineralParams, apply_color, apply_mineral};
@@ -32,9 +32,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Id under which [`Aux::masks`] carries the deringing area ([`dering::weight`]), computed on
-/// the whole image like the layers' masks.
+/// Id under which [`Aux::masks`] carries deconvolution's anti-ringing area
+/// ([`dering::weight`]), computed on the whole image like the layers' masks.
 pub const DERING_MASK: u64 = u64::MAX;
+/// Id under which [`Aux::masks`] carries where the user painted over the ring to lift
+/// ([`dering::painted`]).
+pub const RING_MASK: u64 = u64::MAX - 2;
 /// Id under which [`Aux::masks`] carries where "Nitidezza intelligente" works when it leaves
 /// the sky out ([`crate::mask::subject_and_moons`]).
 pub const SMART_MASK: u64 = u64::MAX - 1;
@@ -86,6 +89,9 @@ pub struct Layer {
     pub wavelet: Module<WaveletParams>,
     #[serde(default)]
     pub contrast: Module<ContrastParams>,
+    /// The final ("smart") sharpening of the layer's region.
+    #[serde(default)]
+    pub smart: Module<SmartParams>,
     #[serde(default)]
     pub tone: Module<ToneParams>,
     pub color: Module<ColorParams>,
@@ -94,7 +100,7 @@ pub struct Layer {
 impl Layer {
     /// Whether the layer changes anything compared with the whole image.
     pub fn overrides_any(&self) -> bool {
-        self.denoise.enabled || self.wavelet.enabled || self.contrast.enabled || self.tone.enabled || self.color.enabled
+        self.denoise.enabled || self.wavelet.enabled || self.contrast.enabled || self.smart.enabled || self.tone.enabled || self.color.enabled
     }
 }
 
@@ -152,6 +158,7 @@ impl Pipeline {
             denoise: Module::off(self.denoise.params.clone()),
             wavelet: Module::on(self.wavelet.params.clone()),
             contrast: Module::off(self.contrast.params.clone()),
+            smart: Module::off(self.smart.params.clone()),
             tone: Module::off(self.tone.params.clone()),
             color: Module::off(self.color.params.clone()),
         });
@@ -199,6 +206,7 @@ impl Pipeline {
         wavelet(&mut p.wavelet.params);
         contrast(&mut p.contrast.params);
         p.dering.params.radius = ((p.dering.params.radius as f32 * s).round() as u32).max(1);
+        p.dering.params.width *= s;
         // Frequencies in cycles per pixel grow as the pixels do.
         if p.smart.params.cutoff > 0.0 {
             p.smart.params.cutoff = (p.smart.params.cutoff * factor as f32).min(0.5);
@@ -206,6 +214,9 @@ impl Pipeline {
         for layer in &mut p.layers {
             wavelet(&mut layer.wavelet.params);
             contrast(&mut layer.contrast.params);
+            if layer.smart.params.cutoff > 0.0 {
+                layer.smart.params.cutoff = (layer.smart.params.cutoff * factor as f32).min(0.5);
+            }
         }
         p
     }
@@ -240,8 +251,8 @@ impl Stage {
         Stage::Deconv,
         Stage::Denoise,
         Stage::Wavelet,
-        Stage::Smart,
         Stage::Contrast,
+        Stage::Smart,
         Stage::Dering,
         Stage::Tone,
         Stage::Curves,
@@ -259,13 +270,13 @@ impl Stage {
             Stage::Deconv => "Deconvoluzione",
             Stage::Denoise => "Riduzione rumore",
             Stage::Wavelet => "Wavelet",
-            Stage::Smart => "Nitidezza intelligente",
+            Stage::Smart => "Nitidezza finale",
             Stage::Contrast => "Contrasto",
             Stage::Dering => "Dering",
             Stage::Tone => "Livelli tonali",
             Stage::Curves => "Curve",
             Stage::Color => "Colore",
-            Stage::Layers => "Livelli",
+            Stage::Layers => "Maschere",
             Stage::Mineral => "Mineral Moon",
             Stage::Rings => "Anelli di Saturno",
             Stage::Moons => "Lune",
@@ -281,19 +292,20 @@ pub struct Aux<'a> {
     /// External luminance for LRGB, with its generation.
     pub luminance: Option<(Arc<Vec<f32>>, u64)>,
     pub bxt_executable: Option<&'a Path>,
-    /// Also return where sharpening left rings ([`dering::ringing_map`]).
+    /// Also return the ring found under the brush ([`dering::Ring::map`]).
     pub ringing_map: bool,
-    /// The disk deringing works inside ([`dering::find_globe`]), found on the whole image;
-    /// otherwise it is looked for in the processed region.
-    pub globe: Option<crate::mask::Ellipse>,
     /// Also return this map of the smart sharpening, computed on the image entering it.
     pub smart_view: crate::smart::SmartView,
 }
 
-/// Whether the pipeline uses the deringing area: deringing itself, or deconvolution's
-/// anti-ringing.
+/// Whether the pipeline uses deconvolution's anti-ringing area.
 pub fn needs_dering_area(p: &Pipeline) -> bool {
-    (p.dering.enabled && !p.dering.params.is_neutral()) || (p.deconv.enabled && !p.deconv.params.is_neutral() && p.deconv.params.deringing > 0.0)
+    p.deconv.enabled && !p.deconv.params.is_neutral() && p.deconv.params.deringing > 0.0
+}
+
+/// Whether the pipeline lifts a painted ring.
+pub fn needs_ring_area(p: &Pipeline) -> bool {
+    p.dering.enabled && !p.dering.params.is_neutral()
 }
 
 /// Whether the smart sharpening needs the subject's mask: it is on and leaves the sky out.
@@ -302,12 +314,15 @@ pub fn needs_smart_mask(p: &Pipeline) -> bool {
 }
 
 /// The full-size masks a pipeline needs for `source` (for [`Aux::masks`]): the enabled layers'
-/// and, when deringing is on, its area; the subject when the smart sharpening leaves the sky
-/// out.
+/// and, when used, the anti-ringing area and the painted ring; the subject when the smart
+/// sharpening leaves the sky out.
 pub fn masks_for(p: &Pipeline, source: &Image) -> Vec<(u64, Arc<Vec<f32>>, u64)> {
     let mut masks: Vec<_> = p.layers.iter().filter(|l| l.enabled).map(|l| (l.id, Arc::new(crate::mask::render(&l.mask, source)), next_generation())).collect();
     if needs_dering_area(p) {
         masks.push((DERING_MASK, Arc::new(dering::weight(source, &p.dering.params)), next_generation()));
+    }
+    if needs_ring_area(p) {
+        masks.push((RING_MASK, Arc::new(dering::painted(&p.dering.params.strokes, source.width(), source.height())), next_generation()));
     }
     if needs_smart_mask(p) {
         masks.push((SMART_MASK, Arc::new(crate::mask::subject_and_moons(source)), next_generation()));
@@ -340,7 +355,7 @@ pub struct RunOutput {
     pub curves_input: Arc<Image>,
     /// What the deconvolution did (when it ran).
     pub deconv: Option<DeconvReport>,
-    /// Where sharpening left rings, when asked for ([`Aux::ringing_map`]).
+    /// The ring found under the brush, when asked for ([`Aux::ringing_map`]).
     pub ringing: Option<Arc<Vec<f32>>>,
     /// The smart sharpening's map asked for ([`Aux::smart_view`]).
     pub smart_map: Option<Arc<crate::smart::SmartMap>>,
@@ -384,8 +399,12 @@ struct WaveletCache {
     decompositions: Vec<Decomposition>,
 }
 
-/// What a ringing map depends on: sharpened and reference generations, radius, tolerance bits.
-type RingingKey = (u64, u64, u32, u32);
+/// What the ring under the brush depends on: image and painted-area generations, forced width
+/// bits.
+type RingKey = (u64, u64, u32);
+
+/// The ring found under the brush, with its generation (`None`: nothing painted).
+type FoundRing = Option<(Arc<dering::Ring>, u64)>;
 
 /// Effective finishing settings of a layer (`None` = module not applied).
 #[derive(Clone, PartialEq)]
@@ -393,7 +412,9 @@ struct LayerKey {
     denoise: Option<NoiseParams>,
     wavelet: Option<WaveletParams>,
     contrast: Option<ContrastParams>,
-    /// With the generation of the deringing area.
+    /// With the generation of the subject mask it leaves the sky out with (0: none).
+    smart: Option<(SmartParams, u64)>,
+    /// With the generation of the painted area.
     dering: Option<(DeringParams, u64)>,
     tone: Option<ToneParams>,
     color: Option<ColorParams>,
@@ -415,15 +436,15 @@ pub struct Processor {
     deconv: Option<Slot<(DeconvParams, u64)>>,
     /// What the last deconvolution computed reported.
     deconv_report: Option<DeconvReport>,
-    /// The last ringing map, with what it was computed from.
-    ringing: Option<(RingingKey, Arc<Vec<f32>>)>,
+    /// The ring found under the brush ([`dering::find_ring`]), with a generation.
+    ring: Option<(RingKey, FoundRing)>,
     denoise: Option<Slot<NoiseParams>>,
     wavelet: Option<Slot<WaveletParams>>,
     smart: Option<Slot<(SmartParams, u64, u64)>>,
     smart_cache: Option<SmartCache>,
     smart_map: Option<(SmartMapKey, Arc<crate::smart::SmartMap>)>,
     contrast: Option<Slot<ContrastParams>>,
-    dering: Option<Slot<(DeringParams, u64, u64)>>,
+    dering: Option<Slot<(DeringParams, u64)>>,
     tone: Option<Slot<ToneParams>>,
     color: Option<Slot<ColorParams>>,
     layers: HashMap<u64, Option<Slot<LayerKey>>>,
@@ -439,8 +460,9 @@ impl Processor {
         let mut timings = Vec::new();
         let mut warnings = Vec::new();
         let mut frame: Frame = (source, source_gen);
-        // The deringing area (also where deconvolution's anti-ringing acts), if provided.
+        // Deconvolution's anti-ringing area and the painted ring, if provided.
         let dering_area = aux.masks.iter().find(|(id, ..)| *id == DERING_MASK).map(|(_, plane, generation)| (Arc::clone(plane), *generation));
+        let ring_area = aux.masks.iter().find(|(id, ..)| *id == RING_MASK).map(|(_, plane, generation)| (Arc::clone(plane), *generation));
         let colour = !frame.0.is_mono();
 
         // Look the stage up in its slot; compute and store it on a miss.
@@ -519,10 +541,17 @@ impl Processor {
             stage!(Stage::Wavelet, self.wavelet, w.clone(), |img: &Image| { apply_wavelet(caches, decompositions, img, denoised.1, w, cancel) });
         }
 
+        // Before the smart sharpening, which works on everything sharpened so far.
+        let base_contrast = Some(p.contrast.params.clone()).filter(|c| p.contrast.enabled && !c.is_neutral());
+        if let Some(c) = &base_contrast {
+            stage!(Stage::Contrast, self.contrast, c.clone(), |img: &Image| { Some(enhance::contrast(img, c)) });
+        }
+
         // Shaped by what earlier steps already did: compared with the image before them.
         let smart_input = frame.clone();
         let subject = aux.masks.iter().find(|(id, ..)| *id == SMART_MASK).map(|(_, plane, generation)| (Arc::clone(plane), *generation));
-        if let Some(s) = Some(p.smart.params.clone()).filter(|s| p.smart.enabled && !s.is_neutral()) {
+        let base_smart = Some(p.smart.params.clone()).filter(|s| p.smart.enabled && !s.is_neutral());
+        if let Some(s) = base_smart.clone() {
             // Nothing sharpened before it: no need to compare.
             let before = (unsharpened.1 != frame.1).then(|| Arc::clone(&unsharpened.0));
             let mask = subject.as_ref().filter(|_| !s.include_sky);
@@ -558,36 +587,25 @@ impl Processor {
             }
         }
 
-        let base_contrast = Some(p.contrast.params.clone()).filter(|c| p.contrast.enabled && !c.is_neutral());
-        if let Some(c) = &base_contrast {
-            stage!(Stage::Contrast, self.contrast, c.clone(), |img: &Image| { Some(enhance::contrast(img, c)) });
-        }
-
-        // Where rings are, judged before deringing (it is meant to show whether it's needed).
-        if aux.ringing_map {
-            let key = (frame.1, unsharpened.1, p.dering.params.radius, p.dering.params.tolerance.to_bits());
-            let key = (key.0, key.1 ^ dering_area.as_ref().map_or(0, |a| a.1).rotate_left(17), key.2, key.3);
-            if self.ringing.as_ref().is_none_or(|(k, _)| *k != key) {
-                // Inside the disk, recovered detail also leaves the blurred image's range: that is
-                // sharpening, not ringing. Rings and halos are judged on the edge band and the sky.
-                let mut map = dering::ringing_map(&frame.0, &unsharpened.0, &p.dering.params);
-                let computed;
-                let area = match dering_area.as_ref().filter(|a| a.0.len() == map.len()) {
-                    Some(a) => a.0.as_slice(),
-                    None => {
-                        computed = dering::weight(&unsharpened.0, &DeringParams { strokes: Vec::new(), ..p.dering.params.clone() });
-                        &computed
-                    }
-                };
-                map.par_iter_mut().zip(area).for_each(|(m, a)| *m *= a);
-                self.ringing = Some((key, Arc::new(map)));
-            }
-        }
         let base_dering = Some(p.dering.params.clone()).filter(|d| p.dering.enabled && !d.is_neutral());
-        let area = dering_area.as_ref().map(|(plane, _)| plane.as_slice());
-        if let Some(d) = &base_dering {
-            let area_gen = dering_area.as_ref().map_or(0, |a| a.1);
-            stage!(Stage::Dering, self.dering, (d.clone(), unsharpened.1, area_gen), |img: &Image| Some(dering::dering(img, &unsharpened.0, d, area, aux.globe)));
+        // The ring under the brush, found once for the deringing and its map.
+        let ring = match ring_area.as_ref().filter(|_| base_dering.is_some() || aux.ringing_map) {
+            Some((area, area_gen)) => {
+                let key: RingKey = (frame.1, *area_gen, p.dering.params.width.to_bits());
+                if self.ring.as_ref().is_none_or(|(k, _)| *k != key) {
+                    let found = dering::find_ring(&frame.0, area, p.dering.params.width).map(|r| (Arc::new(r), next_generation()));
+                    self.ring = Some((key, found));
+                }
+                self.ring.as_ref().and_then(|(_, r)| r.clone())
+            }
+            None => None,
+        };
+        let ring_map = ring.as_ref().filter(|_| aux.ringing_map).map(|(r, _)| Arc::new(r.map.clone()));
+        let area = ring_area.as_ref().map(|(plane, _)| plane.as_slice());
+        if let (Some(d), Some(area)) = (&base_dering, area) {
+            let ring_gen = ring.as_ref().map_or(0, |r| r.1);
+            let found = ring.as_ref().map(|(r, _)| r.as_ref());
+            stage!(Stage::Dering, self.dering, (d.clone(), ring_gen), |img: &Image| Some(dering::dering(img, d, area, found)));
         }
 
         let levels = Some(p.tone.params.clone()).filter(|t| p.tone.enabled && !t.is_neutral());
@@ -630,7 +648,11 @@ impl Processor {
                 denoise: own_or(&layer.denoise, &base_denoise),
                 wavelet: own_or(&layer.wavelet, &base_wavelet),
                 contrast: own_or(&layer.contrast, &base_contrast),
-                dering: base_dering.clone().map(|d| (d, dering_area.as_ref().map_or(0, |a| a.1))),
+                smart: own_or(&layer.smart, &base_smart).filter(|s| !s.is_neutral()).map(|s| {
+                    let mask_gen = subject.as_ref().filter(|_| !s.include_sky).map_or(0, |m| m.1);
+                    (s, mask_gen)
+                }),
+                dering: base_dering.clone().filter(|_| area.is_some()).map(|d| (d, ring_area.as_ref().map_or(0, |a| a.1))),
                 tone: own_or(&layer.tone, &base_tone),
                 color: if colour { own_or(&layer.color, &base_color) } else { None },
             };
@@ -653,8 +675,14 @@ impl Processor {
                     if let Some(c) = &key.contrast {
                         img = enhance::contrast(&img, c);
                     }
-                    if let Some((d, _)) = &key.dering {
-                        img = dering::dering(&img, &unsharpened.0, d, area, aux.globe);
+                    if let Some((sp, _)) = &key.smart {
+                        let before = (img.width(), img.height()) == (unsharpened.0.width(), unsharpened.0.height());
+                        let prepared = crate::smart::prepare(&img, before.then_some(&*unsharpened.0), sp);
+                        let mask = subject.as_ref().filter(|m| !sp.include_sky && m.0.len() == img.width() * img.height());
+                        img = crate::smart::apply(&prepared, &img, sp, mask.map(|m| m.0.as_slice()));
+                    }
+                    if let (Some((d, _)), Some(area)) = (&key.dering, area) {
+                        img = dering::dering(&img, d, area, None);
                     }
                     if let Some(t) = &key.tone {
                         img = enhance::tone(&img, t);
@@ -706,7 +734,7 @@ impl Processor {
             self.drop_quick_stages();
         }
         let deconv = if p.deconv.enabled && !p.deconv.params.is_neutral() { self.deconv_report } else { None };
-        let ringing = if aux.ringing_map { self.ringing.as_ref().map(|(_, m)| Arc::clone(m)) } else { None };
+        let ringing = ring_map;
         let smart_map = if aux.smart_view != crate::smart::SmartView::None { self.smart_map.as_ref().map(|(_, m)| Arc::clone(m)) } else { None };
         Some(RunOutput { image: frame.0, timings, warnings, tone_input, curves_input, deconv, ringing, smart_map })
     }
@@ -720,6 +748,7 @@ impl Processor {
         self.smart_map = None;
         self.contrast = None;
         self.dering = None;
+        self.ring = None;
         self.tone = None;
         self.color = None;
         self.blend = None;
@@ -849,6 +878,27 @@ mod tests {
         assert!(saving.smart_cache.is_none());
         let corner = reused.image.channels()[0][0];
         assert!((corner - 0.02).abs() < 1e-5, "sky {corner}");
+    }
+
+    /// A dark ring painted over is lifted through the pipeline (its area from `masks_for`), and
+    /// its map comes back when asked; nothing painted, nothing changes.
+    #[test]
+    fn painted_ring_is_lifted() {
+        let (w, h) = (96usize, 64usize);
+        let plane: Vec<f32> = (0..w * h).map(|i| if (30..33).contains(&(i / w)) { 0.3 } else { 0.5 }).collect();
+        let src = Arc::new(Image::new(w, h, vec![plane], 16));
+        let mut p = Pipeline::default();
+        (p.deconv.enabled, p.denoise.enabled) = (false, false);
+        p.dering = Module::on(DeringParams::default());
+        assert!(masks_for(&p, &src).iter().all(|m| m.0 != RING_MASK), "nothing painted");
+        p.dering.params.strokes = vec![crate::mask::Stroke { points: vec![[10.0, 31.5], [86.0, 31.5]], radius: 5.0, hardness: 0.5, erase: false }];
+        let masks = masks_for(&p, &src);
+        let out = run(&mut Processor::default(), &src, next_generation(), &p, &Aux { masks: &masks, ringing_map: true, ..Default::default() });
+        let at = |x: usize, y: usize| out.image.channels()[0][y * w + x];
+        assert!((at(48, 31) - 0.5).abs() < 0.02, "ring lifted to its surroundings: {}", at(48, 31));
+        assert!((at(48, 10) - 0.5).abs() < 1e-4, "away from it, untouched: {}", at(48, 10));
+        let map = out.ringing.expect("map asked for");
+        assert!(map[31 * w + 48] > 0.15, "map {}", map[31 * w + 48]);
     }
 
     #[test]

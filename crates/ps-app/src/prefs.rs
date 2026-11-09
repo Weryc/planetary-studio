@@ -6,7 +6,7 @@ use eframe::egui::{self, RichText, Stroke};
 use egui_material_icons::MaterialIcon;
 use egui_material_icons::icons::*;
 use ps_core::analysis::ImageKind;
-use ps_core::pipeline::{LayerRole, Pipeline, Stage};
+use ps_core::pipeline::{Pipeline, Stage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -58,6 +58,9 @@ pub struct Preferences {
     /// The equipment last used (or read from a log), for the next images.
     #[serde(default)]
     pub setup: ps_core::equipment::Setup,
+    /// The last few equipment setups used, newest first, offered in the top bar.
+    #[serde(default)]
+    pub recent_setups: Vec<ps_core::equipment::Setup>,
     /// Keywords added to exported files' names.
     #[serde(default = "default_keywords")]
     pub export_keywords: Vec<crate::naming::NameKeyword>,
@@ -94,12 +97,12 @@ fn yes() -> bool {
 pub enum Group {
     Favorites,
     Sharpness,
+    /// Fixing what the processing left behind (rings, halos).
+    Corrections,
     Noise,
     Tone,
     Color,
     Regions,
-    /// Not a group of modules: the equipment and diagnosis tab.
-    Instrument,
     /// Not a group of modules: the export tab.
     Export,
 }
@@ -109,11 +112,11 @@ impl Group {
         match self {
             Group::Favorites => "Preferiti",
             Group::Sharpness => "Nitidezza",
+            Group::Corrections => "Correzione artefatti",
             Group::Noise => "Rumore",
             Group::Tone => "Curve e livelli",
             Group::Color => "Colore",
-            Group::Regions => "Livelli",
-            Group::Instrument => "Strumento",
+            Group::Regions => "Maschere",
             Group::Export => "Esporta",
         }
     }
@@ -122,18 +125,19 @@ impl Group {
         match self {
             Group::Favorites => ICON_STAR,
             Group::Sharpness => ICON_DEBLUR,
+            Group::Corrections => ICON_HEALING,
             Group::Noise => ICON_GRAIN,
             Group::Tone => ICON_SHOW_CHART,
             Group::Color => ICON_PALETTE,
             Group::Regions => ICON_LAYERS,
-            Group::Instrument => ICON_PLANET,
             Group::Export => ICON_IOS_SHARE,
         }
     }
 
     fn of(stage: Stage) -> Group {
         match stage {
-            Stage::Bxt | Stage::Deconv | Stage::Wavelet | Stage::Smart | Stage::Contrast | Stage::Dering => Group::Sharpness,
+            Stage::Bxt | Stage::Deconv | Stage::Wavelet | Stage::Smart | Stage::Contrast => Group::Sharpness,
+            Stage::Dering => Group::Corrections,
             Stage::Denoise => Group::Noise,
             Stage::Tone | Stage::Curves => Group::Tone,
             Stage::Align | Stage::Color | Stage::Mineral => Group::Color,
@@ -143,7 +147,7 @@ impl Group {
 }
 
 /// Processing order: sharpen, clean, then tone and colour, then local work.
-pub const GROUP_ORDER: [Group; 5] = [Group::Sharpness, Group::Noise, Group::Tone, Group::Color, Group::Regions];
+pub const GROUP_ORDER: [Group; 6] = [Group::Sharpness, Group::Corrections, Group::Noise, Group::Tone, Group::Color, Group::Regions];
 
 /// Whether a module makes sense for this image.
 pub fn relevant(stage: Stage, kind: ImageKind, mono: bool) -> bool {
@@ -165,14 +169,12 @@ impl Default for Preferences {
             (Stage::Deconv, Visible),
             (Stage::Denoise, Visible),
             (Stage::Wavelet, Visible),
-            (Stage::Smart, Visible),
             (Stage::Contrast, Visible),
+            (Stage::Smart, Visible),
             (Stage::Dering, Visible),
             (Stage::Tone, Visible),
             (Stage::Curves, Visible),
             (Stage::Color, Visible),
-            (Stage::Rings, Visible),
-            (Stage::Moons, Visible),
             (Stage::Layers, Visible),
             (Stage::Mineral, Visible),
         ]
@@ -192,6 +194,7 @@ impl Default for Preferences {
             export_suffix: "_ps".into(),
             export_keywords: default_keywords(),
             setup: Default::default(),
+            recent_setups: Vec::new(),
             histogram_mode: Default::default(),
             collapsed_sections: HashSet::new(),
             memory_saving: false,
@@ -242,6 +245,9 @@ impl Preferences {
             self.one_group_open = true;
         }
         self.version = VERSION;
+        // Rings and moons are masks in the "Maschere" list now, no longer modules of their own:
+        // a stale "hidden" entry must not switch their masks off.
+        self.modules.retain(|m| !matches!(m.stage, Stage::Rings | Stage::Moons));
         let defaults = Preferences::default().modules;
         let missing: Vec<ModulePref> = defaults.iter().filter(|d| !self.modules.iter().any(|m| m.stage == d.stage)).cloned().collect();
         self.modules.extend(missing);
@@ -316,10 +322,8 @@ impl Preferences {
                 Stage::Layers => p.layers.iter_mut().for_each(|l| l.enabled = false),
                 Stage::Mineral => p.mineral.enabled = false,
                 Stage::Dering => p.dering.enabled = false,
-                Stage::Rings | Stage::Moons => {
-                    let role = if m.stage == Stage::Rings { LayerRole::Rings } else { LayerRole::Moons };
-                    p.layers.iter_mut().filter(|l| l.role == Some(role)).for_each(|l| l.enabled = false);
-                }
+                // Listed among the masks, not as modules (see `upgraded`).
+                Stage::Rings | Stage::Moons => {}
             }
         }
         p
@@ -564,6 +568,19 @@ mod tests {
         assert_eq!(layout[0].0, Group::Sharpness, "sharpening comes first");
         let color = layout.iter().find(|(g, _)| *g == Group::Color).unwrap();
         assert!(color.1.contains(&Stage::Align) && !color.1.contains(&Stage::Tone), "tone and colour are separate");
+    }
+
+    /// Rings and moons used to be modules: hiding one switched its mask off.
+    #[test]
+    fn old_ring_and_moon_modules_are_dropped() {
+        let mut old = Preferences::default();
+        old.modules.push(ModulePref { stage: Stage::Rings, visibility: Visibility::Hidden });
+        let p = old.upgraded();
+        assert!(!p.modules.iter().any(|m| matches!(m.stage, Stage::Rings | Stage::Moons)));
+        let mut pipeline = Pipeline::default();
+        ps_core::preset::add_role_layer(&mut pipeline, ps_core::pipeline::LayerRole::Rings);
+        assert!(p.effective(&pipeline, ImageKind::Saturn, false).layers[0].enabled);
+        assert!(!p.panel_layout(ImageKind::Saturn, false).iter().flat_map(|(_, s)| s).any(|s| *s == Stage::Rings));
     }
 
     #[test]

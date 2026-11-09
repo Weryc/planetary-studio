@@ -134,6 +134,12 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
+/// Mix of two opaque colours, `t` = 0 → `a`, 1 → `b`.
+pub fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    egui::Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
 /// Rounded card used for pipeline steps and parameter groups.
 pub fn card() -> egui::Frame {
     egui::Frame::new()

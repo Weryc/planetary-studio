@@ -65,6 +65,13 @@ pub enum InstrumentAction {
     LoadLog,
 }
 
+/// A short name for a setup, for the top bar: "C8 · ASI462MC", or what is missing.
+pub fn setup_label(setup: &Setup) -> String {
+    let short = |name: &str| name.split(" (").next().unwrap_or(name).to_string();
+    let parts: Vec<String> = [setup.telescope.as_ref().map(|t| short(&t.name)), setup.camera.as_ref().map(|c| short(&c.name))].into_iter().flatten().collect();
+    if parts.is_empty() { "Strumento non indicato".into() } else { parts.join(" · ") }
+}
+
 pub struct InstrumentView<'a> {
     pub setup: &'a mut Setup,
     pub capture: &'a mut CaptureState,
@@ -82,7 +89,13 @@ pub fn instrument_body(ui: &mut Ui, view: InstrumentView, actions: &mut Vec<Inst
 
     section(ui, "OGGETTO");
     let mut body = capture.body;
-    let source = if capture.body.is_some() && capture.body == capture.info.body { if capture.log.is_some() { " · dal log" } else { " · dal nome del file" } } else { "" };
+    let source = if capture.body.is_some() && capture.body == capture.info.body {
+        if capture.log.is_some() { " · dal log" } else { " · dal nome del file" }
+    } else if capture.body.is_some() && capture.body == analysis.planet {
+        " · dall'aspetto"
+    } else {
+        ""
+    };
     choose(ui, "Soggetto", &mut body, Body::ALL.iter().map(|b| (Some(*b), b.label().to_string())).collect(), "Non indicato", source);
     if body != capture.body {
         capture.body = body;

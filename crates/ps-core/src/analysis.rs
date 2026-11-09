@@ -86,6 +86,10 @@ pub struct Analysis {
     /// What the equipment means for the image (set from the user's setup or the capture log,
     /// not measured here).
     pub optics: Option<Optics>,
+    /// Which planet the pixels suggest, when they say anything (see [`guess_planet`]): Saturn
+    /// for `Saturn`, Mars from its colour, Jupiter from its flattening. A name in the file or
+    /// in the capture log is more reliable and wins.
+    pub planet: Option<crate::capture::Body>,
 }
 
 pub fn analyze(img: &Image) -> Analysis {
@@ -103,7 +107,7 @@ pub fn analyze(img: &Image) -> Analysis {
     // A subject inside the frame is aligned by centroids; a surface by correlation.
     let rgb_shift = align::estimate_by_centroid(img);
     let (psf_sigma, psf_moffat, channel_sigma, spectral, power, optics) = (None, None, None, None, Vec::new(), None);
-    let base = Analysis { kind: ImageKind::Planet, confidence: Confidence::Low, disk: None, noise, snr, psf_sigma, psf_moffat, channel_sigma, rgb_shift, subject_size: frame, spectral, power, optics };
+    let base = Analysis { kind: ImageKind::Planet, confidence: Confidence::Low, disk: None, noise, snr, psf_sigma, psf_moffat, channel_sigma, rgb_shift, subject_size: frame, spectral, power, optics, planet: None };
 
     // Subject running off the frame edges: a close-up or mosaic of an extended surface.
     let border = border_fraction(&mask, sw, sh);
@@ -152,7 +156,39 @@ pub fn analyze(img: &Image) -> Analysis {
         _ => None,
     };
     let (spectral, power) = spectrum::measure(&lum, w, h, bcx * scale, bcy * scale);
-    Analysis { kind, confidence, disk, psf_sigma: fit.map(|f| f.sigma), psf_moffat: fit.and_then(|f| f.moffat), channel_sigma, subject_size: diameter, spectral, power, ..base }
+    let planet = match kind {
+        ImageKind::Saturn => Some(crate::capture::Body::Saturn),
+        ImageKind::Planet => guess_planet(img, &mask, sw, scale, aspect, round),
+        _ => None,
+    };
+    Analysis { kind, confidence, disk, planet, psf_sigma: fit.map(|f| f.sigma), psf_moffat: fit.and_then(|f| f.moffat), channel_sigma, subject_size: diameter, spectral, power, ..base }
+}
+
+/// Which planet a lone disk probably is, from the pixels alone, or `None` when they don't
+/// say. Mars is the only clearly red planet (R/B well above 1.5 in any reasonable colour
+/// balance); Jupiter is the only visibly flattened round one (1/15: an elongation of about
+/// 1.07, where Mars, Venus and Mercury are round within a few thousandths). Venus and Mercury,
+/// usually in phase and nearly colourless, are left to the file name or the user.
+fn guess_planet(img: &Image, small_mask: &[bool], sw: usize, scale: f32, elongation: f32, round: bool) -> Option<crate::capture::Body> {
+    use crate::capture::Body;
+    if let [r, g, b] = img.channels() {
+        let (w, h) = (img.width(), img.height());
+        let mut sum = [0.0f64; 3];
+        let mut n = 0usize;
+        for (i, _) in small_mask.iter().enumerate().filter(|(_, m)| **m) {
+            let (x, y) = (((i % sw) as f32 + 0.5) * scale, ((i / sw) as f32 + 0.5) * scale);
+            let (x, y) = ((x as usize).min(w - 1), (y as usize).min(h - 1));
+            let k = y * w + x;
+            sum[0] += r[k] as f64;
+            sum[1] += g[k] as f64;
+            sum[2] += b[k] as f64;
+            n += 1;
+        }
+        if n > 0 && sum[2] > 0.0 && sum[1] > 0.0 && sum[0] / sum[2] > 1.7 && sum[0] / sum[1] > 1.25 {
+            return Some(Body::Mars);
+        }
+    }
+    (round && (1.04..1.11).contains(&elongation)).then_some(Body::Jupiter)
 }
 
 /// Image scale (arcsec per pixel) from the subject's size in pixels and its apparent diameter

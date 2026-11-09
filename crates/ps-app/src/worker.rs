@@ -9,9 +9,9 @@ use crate::widgets::Histogram;
 use eframe::egui::{self, Color32, ColorImage};
 use rayon::prelude::*;
 use ps_core::Image;
-use ps_core::mask::{self, Ellipse, MaskSpec};
-use ps_core::dering::{self, AreaKey, DeringRegion};
-use ps_core::pipeline::{Aux, DERING_MASK, Pipeline, Processor, SMART_MASK, Stage, StageTiming, next_generation};
+use ps_core::mask::{self, MaskSpec, Stroke};
+use ps_core::dering::{self, AreaKey};
+use ps_core::pipeline::{Aux, DERING_MASK, Pipeline, Processor, RING_MASK, SMART_MASK, Stage, StageTiming, next_generation};
 use ps_core::smart::{SmartMap, SmartView};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -81,6 +81,8 @@ pub struct Output {
     pub background: bool,
     /// (layer id, overlay) for the requested layer mask, at full-image display size.
     pub mask_overlay: Option<(u64, Arc<ColorImage>)>,
+    /// A small picture of each resolved layer mask, for the list of masks.
+    pub mask_thumbs: Vec<MaskThumb>,
     /// A reduced, approximate preview: `image` is smaller than the source.
     pub proxy: bool,
     /// Rings left by sharpening (same region as `image`).
@@ -91,6 +93,20 @@ pub struct Output {
     /// periods (px) its colours span.
     pub smart_overlay: Option<(Arc<ColorImage>, Option<(f32, f32)>)>,
 }
+
+/// A layer mask in miniature: white where it applies.
+#[derive(Clone)]
+pub struct MaskThumb {
+    pub layer: u64,
+    /// Changes whenever the mask does.
+    pub generation: u64,
+    pub image: Arc<ColorImage>,
+    /// Selects (almost) nothing.
+    pub empty: bool,
+}
+
+/// Longest side of a mask's miniature, in pixels.
+const THUMB_SIDE: usize = 56;
 
 #[derive(Clone, Copy)]
 pub struct Progress {
@@ -125,9 +141,9 @@ impl Worker {
             ctx,
             masks: HashMap::new(),
             overlays: HashMap::new(),
+            thumbs: HashMap::new(),
             roi_planes: HashMap::new(),
             proxy_planes: HashMap::new(),
-            globe: None,
         };
         std::thread::Builder::new()
             .name("processing".into())
@@ -168,6 +184,8 @@ type Plane = (Arc<Vec<f32>>, u64);
 enum MaskKey {
     Layer(MaskSpec),
     Dering(AreaKey),
+    /// Where the user painted over the ring.
+    Ring(Vec<Stroke>),
     /// The subject and its moons: depends on the source only.
     Subject,
 }
@@ -192,12 +210,12 @@ struct WorkerThread {
     masks: HashMap<u64, MaskEntry>,
     /// Display overlays by mask generation.
     overlays: HashMap<u64, Arc<ColorImage>>,
+    /// Mask miniatures by mask generation: (image, empty).
+    thumbs: HashMap<u64, (Arc<ColorImage>, bool)>,
     /// ROI crops of auxiliary planes: (full generation, ROI) → (crop, its generation).
     roi_planes: HashMap<(u64, Roi), Plane>,
     /// Reduced auxiliary planes for the quick preview: (full generation, factor) → plane.
     proxy_planes: HashMap<(u64, usize), Plane>,
-    /// The deringing disk on the full source: (source generation, region) → ellipse.
-    globe: Option<((u64, DeringRegion), Option<Ellipse>)>,
 }
 
 /// What a request is processed on, besides the full source.
@@ -327,6 +345,10 @@ impl WorkerThread {
         if ps_core::pipeline::needs_dering_area(p) || req.mask_overlay == Some(DERING_MASK) {
             wanted.push((DERING_MASK, MaskKey::Dering(p.dering.params.area_key())));
         }
+        // The painted ring: also for its map and while its strokes are shown.
+        if ps_core::pipeline::needs_ring_area(p) || req.mask_overlay == Some(RING_MASK) || (req.ringing_map && !p.dering.params.strokes.is_empty()) {
+            wanted.push((RING_MASK, MaskKey::Ring(p.dering.params.strokes.clone())));
+        }
         // The smart sharpening's maps show the subject only, even when it sharpens the sky.
         if ps_core::pipeline::needs_smart_mask(p) || req.smart_view != SmartView::None {
             wanted.push((SMART_MASK, MaskKey::Subject));
@@ -340,6 +362,7 @@ impl WorkerThread {
                     let plane = Arc::new(match &key {
                         MaskKey::Layer(spec) => mask::render(spec, &req.source),
                         MaskKey::Dering(_) => dering::weight(&req.source, &p.dering.params),
+                        MaskKey::Ring(strokes) => dering::painted(strokes, req.source.width(), req.source.height()),
                         MaskKey::Subject => mask::subject_and_moons(&req.source),
                     });
                     self.masks.insert(id, MaskEntry { key, source_gen: req.source_gen, plane, generation: next_generation() });
@@ -348,19 +371,6 @@ impl WorkerThread {
                 (id, Arc::clone(&e.plane), e.generation)
             })
             .collect()
-    }
-
-    /// The deringing disk on the full source, when deringing is on.
-    fn resolve_globe(&mut self, req: &Request) -> Option<Ellipse> {
-        let p = &req.pipeline.dering;
-        if !p.enabled || p.params.is_neutral() {
-            return None;
-        }
-        let key = (req.source_gen, p.params.region);
-        if self.globe.as_ref().is_none_or(|(k, _)| *k != key) {
-            self.globe = Some((key, dering::find_globe(&req.source, p.params.region)));
-        }
-        self.globe.as_ref().and_then(|(_, g)| *g)
     }
 
     /// The crop of a full-size plane matching the ROI input, cached so its generation is stable.
@@ -397,14 +407,13 @@ impl WorkerThread {
     ) -> Option<Output> {
         let start = Instant::now();
         let full_masks = self.resolve_masks(&req);
-        let globe = self.resolve_globe(&req);
         let (full_w, full_h) = (req.source.width(), req.source.height());
         let mut pipeline = req.pipeline.clone();
         let roi_input = match input {
             Input::Roi(c) => Some(c),
             _ => None,
         };
-        let (input, input_gen, masks, luminance, globe) = match input {
+        let (input, input_gen, masks, luminance) = match input {
             Input::Proxy(c) => {
                 let f = c.factor;
                 pipeline = pipeline.downscaled(f);
@@ -414,7 +423,7 @@ impl WorkerThread {
                 });
                 let masks: Vec<_> = masks.collect();
                 let luminance = req.luminance.as_ref().map(|(plane, g)| self.proxy_plane(plane, *g, full_w, full_h, f));
-                (Arc::clone(&c.image), c.generation, masks, luminance, globe.map(|g| g.in_region(0.0, 0.0, f as f32)))
+                (Arc::clone(&c.image), c.generation, masks, luminance)
             }
             Input::Roi(c) => {
                 let masks = full_masks.iter().map(|(id, plane, g)| {
@@ -423,12 +432,11 @@ impl WorkerThread {
                 });
                 let masks: Vec<_> = masks.collect();
                 let luminance = req.luminance.as_ref().map(|(plane, g)| self.roi_plane(plane, *g, full_w, c.region, c.roi));
-                let globe = globe.map(|g| g.in_region(c.region.x as f32, c.region.y as f32, 1.0));
-                (Arc::clone(&c.image), c.generation, masks, luminance, globe)
+                (Arc::clone(&c.image), c.generation, masks, luminance)
             }
-            Input::Full => (Arc::clone(&req.source), req.source_gen, full_masks.clone(), req.luminance.clone(), globe),
+            Input::Full => (Arc::clone(&req.source), req.source_gen, full_masks.clone(), req.luminance.clone()),
         };
-        let aux = Aux { masks: &masks, luminance, bxt_executable: req.bxt_executable.as_deref(), ringing_map: req.ringing_map, globe, smart_view: req.smart_view };
+        let aux = Aux { masks: &masks, luminance, bxt_executable: req.bxt_executable.as_deref(), ringing_map: req.ringing_map, smart_view: req.smart_view };
         // What the clipping warning compares with.
         let unprocessed = Arc::clone(&input);
         let out = processor.run(input, input_gen, &pipeline, &aux, cancel, report)?;
@@ -488,8 +496,18 @@ impl WorkerThread {
                 .clone();
             Some((id, overlay))
         });
+        let (w, h) = (req.source.width(), req.source.height());
+        let mask_thumbs = full_masks
+            .iter()
+            .filter(|(id, ..)| req.pipeline.layers.iter().any(|l| l.id == *id))
+            .map(|(id, plane, generation)| {
+                let (image, empty) = self.thumbs.entry(*generation).or_insert_with(|| mask_thumb(plane, w, h)).clone();
+                MaskThumb { layer: *id, generation: *generation, image, empty }
+            })
+            .collect();
         let live: Vec<u64> = full_masks.iter().map(|m| m.2).collect();
         self.overlays.retain(|g, _| live.contains(g));
+        self.thumbs.retain(|g, _| live.contains(g));
         Some(Output {
             source_gen: req.source_gen,
             pipeline: req.pipeline,
@@ -506,6 +524,7 @@ impl WorkerThread {
             elapsed: start.elapsed(),
             background,
             mask_overlay,
+            mask_thumbs,
             proxy: req.proxy > 1 && req.roi.is_none(),
             ringing_overlay,
             clip_overlay,
@@ -673,6 +692,45 @@ fn clip_overlay(image: &Image, before: &Image, max_side: usize) -> (ColorImage, 
         })
         .collect();
     (ColorImage::new([dw, dh], pixels), count)
+}
+
+/// A mask shrunk to [`THUMB_SIDE`], white where it applies, and whether it selects (almost)
+/// nothing. Framed on what it selects (with some room around), so a small planet's mask is
+/// still readable; each thumbnail pixel takes the strongest value under it, so thin rings and
+/// small moons don't vanish.
+fn mask_thumb(plane: &[f32], w: usize, h: usize) -> (Arc<ColorImage>, bool) {
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if plane[y * w + x] > 0.05 {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+    }
+    if x1 <= x0 {
+        let pixels = vec![Color32::from_gray(20); THUMB_SIDE * THUMB_SIDE];
+        return (Arc::new(ColorImage::new([THUMB_SIDE, THUMB_SIDE], pixels)), true);
+    }
+    // A square frame around what is selected, 30 % larger, kept inside the image.
+    let side = (((x1 - x0).max(y1 - y0) as f32 * 1.3) as usize).clamp(1, w.max(h));
+    let centre = |a: usize, b: usize, len: usize| ((a + b) / 2).saturating_sub(side / 2).min(len.saturating_sub(side.min(len)));
+    let (fx, fy) = (centre(x0, x1, w), centre(y0, y1, h));
+    let (fw, fh) = (side.min(w - fx), side.min(h - fy));
+    let f = fw.max(fh).div_ceil(THUMB_SIDE).max(1);
+    let (dw, dh) = ((fw / f).max(1), (fh / f).max(1));
+    let pixels = (0..dw * dh)
+        .map(|i| {
+            let (bx, by) = (fx + (i % dw) * f, fy + (i / dw) * f);
+            let mut m = 0.0f32;
+            for y in by..(by + f).min(h) {
+                for x in bx..(bx + f).min(w) {
+                    m = m.max(plane[y * w + x]);
+                }
+            }
+            Color32::from_gray((m.clamp(0.0, 1.0) * 235.0 + 20.0) as u8)
+        })
+        .collect();
+    (Arc::new(ColorImage::new([dw, dh], pixels)), false)
 }
 
 /// Semi-transparent tint showing where a mask applies.

@@ -1,0 +1,32 @@
+# Builds the Linux packages and attaches them to the release (macOS and Windows are built
+# locally and uploaded with the release itself).
+name: Linux build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the Linux packages to (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: packaging/make_linux.sh
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" target/linux/*.tar.gz target/linux/*.AppImage --clobber

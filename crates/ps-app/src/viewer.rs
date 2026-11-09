@@ -128,6 +128,9 @@ pub struct ViewerOutput {
     /// Box drawn with the probe (image coordinates).
     pub probed: Option<Rect>,
     pub hovered: bool,
+    /// The button under the ROI was clicked: done editing it (back to moving the view), or
+    /// edit it again.
+    pub roi_toggle: bool,
 }
 
 pub struct Viewer {
@@ -555,10 +558,31 @@ impl Viewer {
             let rect = self.rect_to_screen(canvas, self.rect_of_roi(r));
             shade_outside(&painter, image_rect.intersect(canvas), rect, 120);
             painter.rect_stroke(rect, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
-            if tool == Tool::Roi {
+            let editing = tool == Tool::Roi;
+            if editing {
                 corner_handles(&painter, rect, ACCENT);
             }
             pill(&painter, rect.left_top() - Vec2::new(0.0, 22.0), &format!("ROI {} × {}", r.w, r.h), ACCENT, Color32::BLACK);
+            // Below the box's bottom-right corner (inside it when that would leave the canvas):
+            // finish editing and go back to moving the view, or edit again.
+            if matches!(tool, Tool::Roi | Tool::Pan) && self.drag.is_none() {
+                let (icon, text, tip) = if editing {
+                    (egui_material_icons::icons::ICON_CHECK, "Fatto", "Fine modifica della ROI: torna a spostare la vista")
+                } else {
+                    (egui_material_icons::icons::ICON_EDIT, "Modifica ROI", "Sposta o ridimensiona la ROI")
+                };
+                let size = Vec2::new(if editing { 82.0 } else { 124.0 }, 24.0);
+                let mut at = rect.right_bottom() + Vec2::new(-size.x, 8.0);
+                if at.y + size.y > canvas.bottom() - 4.0 {
+                    at.y = rect.bottom() - size.y - 8.0;
+                }
+                at.x = at.x.max(canvas.left() + 4.0);
+                let (fill, colour) = if editing { (ACCENT, Color32::BLACK) } else { (Color32::from_black_alpha(190), TEXT) };
+                let button = egui::Button::new((icon.rich_text().color(colour), egui::RichText::new(text).strong().color(colour))).fill(fill).corner_radius(CornerRadius::same(12));
+                if ui.put(Rect::from_min_size(at, size), button).on_hover_text(tip).clicked() {
+                    output.roi_toggle = true;
+                }
+            }
         }
 
         if let Some((r, kind)) = self.shape {

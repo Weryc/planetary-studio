@@ -6,10 +6,7 @@ use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Response, RichText, 
 use egui_material_icons::MaterialIcon;
 use std::ops::RangeInclusive;
 
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
-    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
-}
+use theme::lerp_color;
 
 /// iOS-style animated on/off switch.
 pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {

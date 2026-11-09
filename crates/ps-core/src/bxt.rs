@@ -44,7 +44,7 @@ fn yes() -> bool {
 
 impl Default for BxtParams {
     fn default() -> Self {
-        Self { sharpen_nonstellar: 0.7, sharpen_stars: 0.0, auto_psf: false, psf_diameter: 3.0, correct_only: false, lunar_planetary: true, passes: 1 }
+        Self { sharpen_nonstellar: 1.0, sharpen_stars: 0.0, auto_psf: false, psf_diameter: 3.0, correct_only: false, lunar_planetary: true, passes: 1 }
     }
 }
 

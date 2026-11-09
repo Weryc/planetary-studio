@@ -280,9 +280,11 @@ deconvoluzione resta unica, perché la sfocatura è la stessa ovunque.
   in una pila, si può riprendere ("Indietro") o togliere. L'istogramma dietro la curva è quello
   dell'immagine su cui lavora la regolazione corrente. Contagocce per il punto del nero e del
   bianco (media 3×3 della luminanza nel punto cliccato).
-- **Anelli di Saturno e Lune**: schede dedicate nell'area Livelli, ciascuna con un livello
-  preconfigurato (`LayerRole`). Anelli: wavelet sulle scale da 2–4 px e un po' di contrasto.
-  Lune: un po' di nitidezza e toni medi alzati (le lune sono molto più deboli del pianeta).
+- **Anelli di Saturno e Lune**: maschere preconfigurate (`LayerRole`), proposte in cima al menu
+  "Aggiungi maschera" (prima erano schede a parte). Anelli: wavelet sulle scale da 2–4 px e un
+  po' di contrasto. Lune: un po' di nitidezza e toni medi alzati (le lune sono molto più deboli
+  del pianeta). "Valori consigliati" le rimette a posto senza cambiare nome, posizione,
+  interruttore e pennellate.
 - **BlurXTerminator**: stato visibile ("passaggio k di n"), da 1 a 3 passaggi consecutivi.
 - **Spazio**: con il puntatore sull'immagine mostra l'originale anche se un campo ha il focus,
   e non "preme" più il pulsante o l'interruttore che ha il focus; un'etichetta "PRIMA" lo
@@ -320,8 +322,8 @@ cambiare l'interruttore.
 (valori generici, tutto spento, i livelli restano). Nelle Impostazioni si può disattivare anche
 la scelta automatica delle impostazioni avanzate all'apertura (`auto_structure`).
 
-**Pannello.** Nell'area Livelli è aperta una scheda alla volta, e nell'editor di un livello una
-sezione alla volta (se "una sola area alla volta" è attivo). Le aree hanno titolo maiuscolo e
+**Pannello.** Nell'area Maschere c'è un elenco piatto e, sotto, l'editor della sola maschera
+selezionata (vedi "Area Maschere"). Le aree hanno titolo maiuscolo e
 barra alta; le schede sono rientrate sotto l'area con una linea guida; "Avanzate" è un riquadro
 annidato nella scheda.
 
@@ -750,6 +752,106 @@ Risultati dentro il disco di 2R0009 (8 / 6 / 5 / 4 / 2,2 px): intelligente 60 % 
 5,6 / 3,4 / 0,67; deconv + intelligente 35 % ×2,8 / 6,2 / 7,1 / 6,3 / 1,4; BlurXTerminator
 ×7,6 / 12,5 / 10,7 / 4,4 / 0,81.
 
+## 5octodecies. Anello scuro dentro il disco (collimazione, diffrazione)
+
+Il vecchio "anelli concentrici" (mediana su archi di 70° a profondità fissa, solo ciò che la
+nitidezza aggiungeva sotto il riferimento) non vedeva l'anello che si nota su Marte, Giove e
+Saturno: con una collimazione imperfetta la sfocatura del bordo cambia da lato a lato, e
+l'anello che la nitidezza ne ricava è una **copia del bordo spostata** (vicina al bordo da un
+lato, più dentro dall'altro) e spesso c'è solo su metà disco. Sullo stack 2R0009 l'anello non
+c'è (profilo radiale liscio): lo disegna la nitidezza.
+
+`dering::limb_rings` / `ring_change`:
+- La fascia sotto il bordo (fino a `depth` del raggio, letta un po' più a fondo) è srotolata
+  in angolo (720 passi) × profondità; si usa il cambiamento della nitidezza `sharp − reference`.
+- Bande e macchie c'erano già: il loro dettaglio (passa-banda sottile − largo, σ ≈ 0,6 e
+  2,2 × la sfocatura) moltiplicato per il guadagno della nitidezza (minimi quadrati sul
+  passa-banda) viene tolto. Resta ciò che la nitidezza ha disegnato senza un modello
+  nell'originale.
+- L'anello è la curva profondità(θ) = a + b cos θ + c sin θ (bordo scalato e spostato) che
+  raccoglie più "solco" tutto intorno (ricerca a griglia grossa ogni 2°, poi fine); poi segue
+  i solchi vicini (± sfocatura, smussato su 10°).
+- Lungo la curva si adatta, per ogni angolo, retta + gaussiana scura (larghezza scelta fra
+  cinque per massima varianza spiegata); la profondità non supera mai il riempimento della
+  valle. Intensità = livello tenuto su due terzi di una finestra di ±30° (una banda dritta che
+  costeggia il bordo curvo per pochi gradi non passa), poi smussata su ~8°.
+- Si accetta un anello solo se copre almeno un quarto del bordo; al massimo due.
+- Correzione: la gaussiana ricostruita, sottratta con l'Intensità del modulo, sfumata nei
+  primi 3 px sotto il bordo. "Mostra gli aloni" la aggiunge in magenta.
+- La pipeline calcola gli anelli una volta (cache `rings`) per il dering e per la mappa.
+- Tolto "Orlo chiaro": l'orlo luminoso lo tiene già la parte sui bordi netti.
+- Verificato: test sintetici (anello spostato su metà disco con bande inclinate: tolto per
+  oltre il 60 %, bande ≥ 90 %; senza anello nessuna correzione) e la Giove dell'utente
+  allineata a 2R0009 (anello a 5–13 px su metà disco, trovato e schiarito).
+
+## 5novodecies. Dering sui pianeti: solo l'anello sotto il bordo
+
+Prova dell'utente nell'app (Giove 2R0009, wavelet + nitidezza intelligente): "Mostra gli
+aloni" colorava le bande, perché la parte "aloni sui bordi netti" tratta come bordo ogni salto
+del 10 % entro la larghezza, e i bordi delle bande lo superano; la ricerca dell'anello
+(5octodecies) non scattava, perché togliendo il dettaglio dell'originale toglieva anche la
+curva del bordo e quindi l'anello. Con Larghezza 3 e Contrasto lasciato 0 l'utente vedeva
+l'anello giusto e ha chiesto di fermarsi a quello.
+
+Su un pianeta intero (regione "Tutto" con un disco trovato) ora:
+- l'area è una fascia **sotto il bordo** profonda `radius + 2` px (più il cielo accanto); più
+  dentro nulla, bande comprese;
+- **cielo**: solo ciò che scende sotto il livello del cielo vero (mediana oltre 1,4 raggi meno
+  3 MAD) viene alzato: tenere il cielo nell'intervallo dell'originale rimetteva il bagliore
+  sfocato attorno al pianeta;
+- **bordo vero e proprio** (profondità < 2σ della sfocatura): non toccato, né alzato né
+  abbassato (abbassare l'orlo chiaro lo riammorbidiva, alzare la discesa rimetteva il bagliore);
+- **fascia interna**: si schiarisce solo ciò che è sotto **lo stesso pixel** dell'originale più
+  la variazione media che la nitidezza ha dato al disco subito più dentro (`inner_shift`);
+  confrontarlo col minimo dei vicini lasciava passare l'anello, perché sulla pendenza del bordo
+  il vicino più scuro sta più fuori.
+- La mappa "Mostra gli aloni" (`ringing_map`, ora con il disco) segue le stesse regole.
+Saturno (regione Globo/Anelli) resta com'era. Sulla Giove dell'utente allineata a 2R0009 la
+mappa segna solo l'anello lungo il bordo; Marte 2018 e Giove 2016 quasi nulla.
+
+## 5vicies. Dering a pennello
+
+Le ricerche automatiche dell'anello (5octodecies, 5novodecies) non lo trovavano nemmeno quando
+era ben visibile, e la parte "aloni sui bordi netti" scambiava le bande per anelli. Ora è
+l'utente a dire dov'è: lo **dipinge con il pennello**, largo più o meno quanto l'anello; sotto
+la pennellata `dering::find_ring` lo trova, lo misura e lo schiarisce. Tolti la ricerca
+automatica (`limb_rings`, `ringing_map`, Profondità, Contrasto lasciato, Globo/Anelli) e il
+disco passato alla pipeline (`Aux::globe`). `dering::weight` resta, automatico, solo come area
+dell'anti-ringing della deconvoluzione (`DERING_MASK`); le pennellate sono un'area a parte
+(`RING_MASK`, `dering::painted`).
+
+Sotto la pennellata, per ogni pixel, lungo la direzione **attraverso l'anello**:
+- **direzione**: quella del gradiente dell'immagine (tensore di struttura largo quanto la
+  pennellata: l'anello segue il bordo netto che lo crea), pesata per quanto il bordo è netto
+  rispetto al tipico; dove l'immagine è piatta conta la direzione della pennellata. Le bande che
+  attraversano la pennellata non sono valli in questa direzione.
+- **copia smussata solo lungo l'anello** (σ 1,5 px): il rumore non viene preso per valle e
+  l'anello conserva la sua profondità.
+- **due stime del fondo** sotto la valle: la *chiusura* (max poi min su ±r) riempie fino al
+  lato più basso, sempre sicura (un gradino come il lembo non si alza); una *parabola* sui
+  dintorni a r…2r px dai due lati segue pendenza e curvatura (oscuramento al bordo, la coda
+  sfumata del lembo, che così non viene scambiata per valle) ed è accettata solo se i due lati si
+  continuano (stessa pendenza, o entrambi piatti) e la valle sta ben sotto la parabola rispetto
+  a quanto i dintorni se ne scostano. Con un gradino nascosto sotto la valle (anello nel cielo
+  accanto al lembo) i lati non si continuano e resta la chiusura: il pianeta non si "ingrassa".
+  Ogni pixel prende la parabola del punto vicino meglio centrato sulla valle, valutata alla
+  propria posizione, mai sopra il più chiaro dei dintorni.
+- **larghezza** r: la più piccola che dà il 95 % del riempimento massimo (95° percentile sotto
+  la pennellata), al massimo metà della larghezza dipinta (o "Larghezza anello" in Avanzate).
+- **dov'è**: il riempimento deve esserci lungo gran parte dell'anello (mediana lungo la
+  pennellata su ±max(2r, 8) px: un'estremità di banda che attraversa resta) e uscire dal rumore
+  (MAD di ciò che lo smussamento toglie). La correzione si estende fino a r px oltre la
+  pennellata attraverso l'anello: la pennellata è un'indicazione, non un ritaglio.
+- Ogni canale è riempito per conto suo; il risultato è smussato leggermente lungo l'anello.
+
+Verifiche (`ring_probe`, ora con pennellata simulata `ARC`/`STROKE`, anello sintetico `SYNTH`):
+anello decentrato aggiunto alla Giove 2R0009 tolto per circa tre quarti, bande intatte; anello
+nero nel cielo riempito fino al livello del cielo senza toccare il lembo; lembo senza anello
+(nitidezza Normale) intatto; su Giove con nitidezza esagerata e senza anello solo piccole
+macchie dove le bande toccano la pennellata; cratere lunare: l'ombra larga resta.
+Limiti: una valle vera parallela alla pennellata e più stretta dell'anello (una banda sottile
+lungo il bordo, il solco attorno al picco centrale di un cratere) viene schiarita anch'essa.
+
 ## 6. Interfaccia
 
 ```
@@ -847,3 +949,26 @@ finché non arriva la fase 3 (GPU).
 
 - macOS: `packaging/make_dmg.sh` (`--universal` per Intel + Apple Silicon) → `target/dmg/*.dmg`
 - Windows: `packaging/make_windows.sh` (cross-compilazione con mingw-w64) → `target/windows/*.zip`
+
+## Area Maschere (ridisegno dei livelli)
+
+Nell'interfaccia i livelli si chiamano **maschere** ("livelli" restava ambiguo con i livelli
+wavelet e i livelli tonali); nel codice restano `Layer`. Prima ogni livello apriva il suo editor
+dentro la riga, con cinque riquadri annidati, e Anelli e Lune erano schede a parte: non si
+capiva cosa fosse acceso e cosa facesse.
+
+- **Elenco** (`panels::masks_area`): una riga per maschera con maniglia di trascinamento,
+  interruttore, miniatura della zona, nome (etichetta "auto" per Anelli/Lune), riga di stato e
+  occhio. La riga di stato dice cosa cambia ("Wavelet · Contrasto"), "Come l'immagine intera",
+  oppure un avviso: "Zona vuota" o "Non cambia nulla". Spenta = riga attenuata.
+- **Ordine**: le maschere si fondono nell'ordine dell'elenco, quindi dove si sovrappongono vince
+  la più in basso; si riordinano trascinando la maniglia (drag and drop di egui).
+- **Miniature**: il worker riduce a 56 px ogni maschera già calcolata (`worker::mask_thumb`,
+  in cache per generazione) e le manda nell'output; l'app le tiene come texture per id e le
+  conserva anche quando la maschera si spegne.
+- **Editor**: scheda separata sotto l'elenco, con ZONA (strumenti della maschera) e
+  REGOLAZIONI: sei righe sempre visibili, ciascuna "proprie"/"come l'immagine" con
+  interruttore, una sola aperta alla volta. Niente riquadri annidati: solo intestazioni e un
+  rientro con una linea.
+- **Preferenze**: le vecchie voci dei moduli Anelli/Lune si scartano al caricamento, così un
+  "nascosto" rimasto non spegne più la loro maschera (c'è un test).

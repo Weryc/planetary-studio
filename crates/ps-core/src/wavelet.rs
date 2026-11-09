@@ -312,6 +312,47 @@ pub(crate) fn responses(params: &WaveletParams, fx: f32, fy: f32) -> (Option<f32
     (grain, planes)
 }
 
+/// Frequencies (cycles/px) from 1/128 px to Nyquist, evenly spaced on a log scale.
+pub fn display_frequencies(count: usize) -> Vec<f32> {
+    let (lo, hi) = (1.0f32 / 128.0, 0.5f32);
+    (0..count).map(|i| lo * (hi / lo).powf(i as f32 / (count.max(2) - 1) as f32)).collect()
+}
+
+/// How much detail of each frequency `freqs` (cycles/px) the settings amplify, before the
+/// noise-adaptive and edge brakes (which only lower it): 1 + Σ a·g_j·H_j(f). Gains are on
+/// what each layer keeps after its noise threshold, so thresholds aren't counted.
+pub fn response_curve(params: &WaveletParams, freqs: &[f32]) -> Vec<f32> {
+    freqs
+        .iter()
+        .map(|&f| {
+            let (_, h) = responses(params, f, 0.0);
+            1.0 + h.iter().zip(&params.layers).map(|(h, l)| params.amplify * l.gain * h).sum::<f32>()
+        })
+        .collect()
+}
+
+/// Period (px) of the detail each layer holds the most of: what the layer really acts on. A
+/// free layer of size s peaks near 3.3·s, a classic one of step s near 3–4·s.
+pub fn layer_periods(params: &WaveletParams) -> Vec<f32> {
+    let freqs = display_frequencies(160);
+    let table: Vec<Vec<f32>> = freqs.iter().map(|&f| responses(params, f, 0.0).1).collect();
+    (0..params.layers.len())
+        .map(|j| {
+            let best = (0..freqs.len()).max_by(|&a, &b| table[a][j].total_cmp(&table[b][j])).unwrap_or(0);
+            1.0 / freqs[best]
+        })
+        .collect()
+}
+
+/// Free scales: the period (px) below which the grain holds more of the detail than the first
+/// layer does (finer than this, only cleaning is possible).
+pub fn grain_period(params: &WaveletParams) -> Option<f32> {
+    display_frequencies(160).into_iter().find_map(|f| {
+        let (grain, h) = responses(params, f, 0.0);
+        grain.filter(|&g| g > h.first().copied().unwrap_or(0.0)).map(|_| 1.0 / f)
+    })
+}
+
 /// Gains for the layers of `to` sharpening detail coarser than `up_to` cycles/px as much as
 /// the gains of `from` do: least squares on the overall response 1 + Σ g·H over the frequency
 /// plane below `up_to`. Finer than that is only noise: there `to` (with free scales, whose
@@ -902,6 +943,25 @@ mod tests {
         }
         let real = mad_sigma(&truth.layers[2]);
         assert!(d.white_noise[2] < 0.75 * real, "white {} should fall short of {real}", d.white_noise[2]);
+    }
+
+    #[test]
+    fn response_curve_and_periods() {
+        let mut p = WaveletParams { first_scale: 1.5, ..Default::default() };
+        let freqs = display_frequencies(40);
+        assert!(response_curve(&p, &freqs).iter().all(|g| (g - 1.0).abs() < 1e-5));
+        // Free layers peak about 3.3 times their size, an octave apart.
+        let periods = layer_periods(&p);
+        for (j, period) in periods.iter().enumerate() {
+            let want = 3.3 * p.scale(j);
+            assert!((period - want).abs() < 0.2 * want, "layer {j}: {period} vs {want}");
+        }
+        let below = grain_period(&p).expect("free scales have a grain");
+        assert!(below < periods[0] && below > 1.5 * p.first_scale, "{below}");
+        // A gain on the first layer lifts its periods, little else.
+        p.layers[0].gain = 2.0;
+        let g = response_curve(&p, &[1.0 / periods[0], 1.0 / 64.0]);
+        assert!(g[0] > 1.8 && g[1] < 1.1, "{g:?}");
     }
 
     /// Clipped sky: nothing to measure on, the typical growth is used.

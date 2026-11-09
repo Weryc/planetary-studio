@@ -1,25 +1,23 @@
-//! Deringing: removes the dark and bright bands that sharpening draws along sharp edges — a
-//! planet's limb, Saturn's rings, the rings crossing in front of the globe.
+//! Deringing: lifts the dark ring that diffraction or miscollimation leaves along a sharp edge —
+//! just inside a planet's limb, in the sky around it, beside a crater's rim or shadow on the
+//! Moon — and that sharpening makes plain.
 //!
-//! Deconvolution and wavelet sharpening amplify the Gibbs oscillations at a strong edge: a
-//! bright rind on its bright side, a dark band next to it, a halo in the sky. Diffraction (the
-//! first Airy ring) and miscollimation (an asymmetric ring) put a faint ring in the data that
-//! sharpening then strengthens.
+//! Finding such a ring on its own proved unreliable (belts, spots and the limb's own curve look
+//! alike), so the user paints roughly over it with the brush, about as wide as it is. Under the
+//! painted area:
+//! - **how wide** the ring is: a morphological *closing* (a max filter, then a min filter of the
+//!   same size) fills every dark valley narrower than its window up to the lower of its two
+//!   sides, and leaves alone what is not a valley: a step edge such as the limb, a broad belt, a
+//!   convex disk. Growing the window, the fill on the ring grows until the whole valley is filled,
+//!   then stops: the smallest window reaching almost the full fill is the ring's width (never
+//!   more than the painted band allows);
+//! - **where** it is: where that fill stands clearly out of the noise, softly;
+//! - **the correction**: the fill, computed on a lightly smoothed copy so the noise's own dips
+//!   are not lifted, is added to the image: the ring rises to its surroundings and the grain
+//!   stays. Each colour channel is filled on its own.
 //!
-//! Two corrections:
-//! - **Halos along sharp edges**: the anti-ringing clamp of image resampling, the same idea as
-//!   PixInsight's deringing: ringing creates values *outside the range the unsharpened image
-//!   has around that pixel*, so the sharpened value is held within the local minimum/maximum
-//!   of the reference over about the halo's width, plus a tolerance. It acts only where the
-//!   reference has a sharp edge nearby (its local range is a good part of the subject's
-//!   brightness): belts and fine detail, whose range is small, are left alone. That area is a
-//!   mask ([`weight`]) the user can see and touch up with the brush; on Saturn it can be limited
-//!   to the globe or to the rings.
-//! - **Concentric rings inside the disk** (a planet, Saturn's globe), often on one side only:
-//!   what sharpening changed is taken along arcs at each depth below the limb (the median over
-//!   an angular sector — belts and spots cross the arc and don't survive it), and the dark
-//!   bands of that radial profile are lifted, varying smoothly from sector to sector. The
-//!   brightening of the limb, which is sharpening, stays.
+//! [`weight`] is a separate, automatic area along sharp edges: where deconvolution's
+//! anti-ringing holds its estimate within the observed image's range.
 
 use crate::Image;
 use crate::color::{ColorMode, working_planes};
@@ -30,32 +28,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DeringParams {
-    /// 0 = off, 1 = values fully held within the local range.
+    /// 0 = off, 1 = the ring fully lifted.
     pub strength: f32,
-    /// Width of the halos (px): how far from a sharp edge values are held.
-    pub radius: u32,
-    /// Allowed excess beyond the local range, as a fraction of it (genuine detail recovered
-    /// by deconvolution does go a little beyond).
-    pub tolerance: f32,
-    /// How sharp an edge must be to be treated: its local range as a fraction of the
-    /// subject's brightness, from where the correction starts.
-    pub edges: f32,
-    /// Where the halos are treated.
-    pub region: DeringRegion,
-    /// Brush strokes adding to or removing from the area.
+    /// Where the user painted over the ring.
     pub strokes: Vec<Stroke>,
-    /// How deep below the limb concentric rings are looked for, as a fraction of the radius
-    /// (0 = not looked for).
-    pub depth: f32,
-    /// How much of the bright rind along the limb goes (0‥1): its brightening down to the
-    /// level deeper inside.
-    pub rind: f32,
+    /// The ring's width (px); 0 = measured under the brush.
+    pub width: f32,
+    /// Width of the halos (px) of deconvolution's anti-ringing area ([`weight`]).
+    pub radius: u32,
+    /// How sharp an edge must be to enter that area: its local range as a fraction of the
+    /// subject's brightness.
+    pub edges: f32,
+    /// Where that area lies (on Saturn, the globe or the rings).
+    pub region: DeringRegion,
 }
 
-/// Where halos are treated.
+/// Where deconvolution's anti-ringing area lies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeringRegion {
-    /// Every sharp edge of the image.
+    /// Every sharp edge of the image (on a whole planet, a band along the limb).
     #[default]
     Subject,
     /// Saturn's globe (with the rings crossing it) and its limb.
@@ -64,106 +55,409 @@ pub enum DeringRegion {
     Rings,
 }
 
-/// Everything the area depends on (strength and tolerance don't), to cache it.
+/// Everything the anti-ringing area depends on, to cache it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AreaKey {
     radius: u32,
     edges: f32,
     region: DeringRegion,
-    strokes: Vec<Stroke>,
 }
 
 impl Default for DeringParams {
     fn default() -> Self {
-        Self { strength: 0.8, radius: 4, tolerance: 0.1, edges: 0.1, region: DeringRegion::Subject, strokes: Vec::new(), depth: 0.35, rind: 0.5 }
+        Self { strength: 1.0, strokes: Vec::new(), width: 0.0, radius: 4, edges: 0.1, region: DeringRegion::Subject }
     }
 }
 
 impl DeringParams {
-    /// Halo width from the blur σ (px): the bands of a sharpened edge lie within a few σ of it,
-    /// and wavelet sharpening's coarser layers reach a few pixels further.
+    /// Anti-ringing halo width from the blur σ (px): the bands of a sharpened edge lie within a
+    /// few σ of it.
     pub fn for_blur(sigma: f32) -> Self {
         Self { radius: (2.5 * sigma + 2.0).round().clamp(2.0, 12.0) as u32, ..Default::default() }
     }
 
+    /// Nothing to do: off, or nothing painted.
     pub fn is_neutral(&self) -> bool {
-        self.strength <= 0.0
-    }
-
-    /// Half-size of the neighbourhood whose range a value is held within: a fraction of the
-    /// halo's width, so the range stays that of the pixel's own side of the edge.
-    pub fn window(&self) -> usize {
-        (self.radius as usize).div_ceil(4).max(1)
+        self.strength <= 0.0 || self.strokes.iter().all(|s| s.erase)
     }
 
     pub fn area_key(&self) -> AreaKey {
-        AreaKey { radius: self.radius, edges: self.edges, region: self.region, strokes: self.strokes.clone() }
+        AreaKey { radius: self.radius, edges: self.edges, region: self.region }
     }
 }
 
-/// `sharp` is the processed image, `reference` the same region before sharpening. `area` is
-/// [`weight`] for this region and `globe` the disk ([`find_globe`]) in its coordinates, when
-/// already computed on the whole image (the app does, so a ROI is treated like the rest).
-pub fn dering(sharp: &Image, reference: &Image, p: &DeringParams, area: Option<&[f32]>, globe: Option<Ellipse>) -> Image {
-    let (w, h) = (sharp.width(), sharp.height());
-    if p.is_neutral() || (reference.width(), reference.height()) != (w, h) {
-        return sharp.clone();
+/// Where the user painted over the ring (0‥1), at `w` × `h`.
+pub fn painted(strokes: &[Stroke], w: usize, h: usize) -> Vec<f32> {
+    let mut area = vec![0.0f32; w * h];
+    for stroke in strokes {
+        mask::paint(&mut area, w, h, stroke);
     }
-    let computed;
-    let weight = match area.filter(|a| a.len() == w * h) {
-        Some(a) => a,
-        None => {
-            computed = weight(reference, p);
-            &computed
+    area
+}
+
+/// The ring found under the painted area.
+#[derive(Clone, Debug)]
+pub struct Ring {
+    /// Per channel of the image, how much each pixel is lifted at full strength (≥ 0; zero
+    /// away from the ring).
+    pub lift: Vec<Vec<f32>>,
+    /// The same on the luminance: what "Mostra gli aloni" shows.
+    pub map: Vec<f32>,
+    /// Half-width of the closing that fills it (px): about the ring's width.
+    pub reach: usize,
+}
+
+/// Smoothing (σ, px) along the band of the copy the ring is filled on: the noise's own dips
+/// are not lifted, and the ring, running along the band, keeps its depth.
+const SMOOTH: f32 = 1.5;
+/// The widest closing tried (half-width, px).
+const MAX_REACH: usize = 16;
+
+/// Finds and measures the ring under `area` (the painted coverage, 0‥1, at the image's size)
+/// in `img`. `width` (px, 0 = measured) forces its width. `None` when nothing is painted.
+pub fn find_ring(img: &Image, area: &[f32], width: f32) -> Option<Ring> {
+    let (w, h) = (img.width(), img.height());
+    if area.len() != w * h {
+        return None;
+    }
+    // The painted band's width: twice its area over its outline's length.
+    let (mut inside, mut outline) = (0usize, 0usize);
+    let mut bbox = (w, h, 0usize, 0usize);
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if area[i] <= 1e-3 {
+                continue;
+            }
+            bbox = (bbox.0.min(x), bbox.1.min(y), bbox.2.max(x + 1), bbox.3.max(y + 1));
+            if area[i] >= 0.5 {
+                inside += 1;
+                let edge = x == 0 || y == 0 || x + 1 == w || y + 1 == h || [i - 1, i + 1, i - w, i + w].iter().any(|&j| area[j] < 0.5);
+                outline += edge as usize;
+            }
         }
+    }
+    if inside == 0 {
+        return None;
+    }
+    let band = 2.0 * inside as f32 / outline.max(1) as f32;
+    let max_reach = if width > 0.0 { width.round().max(1.0) as usize } else { (band / 2.0).ceil().clamp(2.0, MAX_REACH as f32) as usize };
+    // Work on the painted part only, with room for the widest closing and the smoothing.
+    let margin = 2 * max_reach + 4;
+    let (x0, y0) = (bbox.0.saturating_sub(margin), bbox.1.saturating_sub(margin));
+    let (x1, y1) = ((bbox.2 + margin).min(w), (bbox.3 + margin).min(h));
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    let crop = |plane: &[f32]| -> Vec<f32> { (y0..y1).flat_map(|y| plane[y * w + x0..y * w + x1].iter().copied()).collect() };
+    let a = crop(area);
+    let lum = crop(&working_planes(img, ColorMode::Luminance).swap_remove(0));
+    let across = across_band(&a, &lum, cw, ch, band);
+    let smooth = along_blur(&lum, cw, ch, &across, SMOOTH);
+    // What the closing of each width adds to the ring: its strongest fill under the brush.
+    let painted_px: Vec<usize> = (0..cw * ch).filter(|&i| a[i] >= 0.5).collect();
+    let strongest = |fill: &[f32]| -> f32 {
+        let mut v: Vec<f32> = painted_px.iter().map(|&i| fill[i]).collect();
+        let k = (v.len() * 95 / 100).min(v.len() - 1);
+        *v.select_nth_unstable_by(k, f32::total_cmp).1
     };
-    // Inside the disk: concentric rings, removed as such.
-    let globe = if p.region == DeringRegion::Rings || p.depth <= 0.0 { None } else { globe.or_else(|| find_globe(reference, p.region)) };
-    let rings = globe.map(|g| {
-        let s = working_planes(sharp, ColorMode::Luminance).swap_remove(0);
-        let r = working_planes(reference, ColorMode::Luminance).swap_remove(0);
-        concentric_rings(&s, &r, w, h, &g, p.depth, p.rind)
-    });
-    // How much of the concentric correction applies: none on the limb, all of it a few pixels
-    // in, so where Saturn's rings cross the limb no seam is left.
-    let lift = |i: usize| match (globe, &rings) {
-        (Some(g), Some(r)) => {
-            let depth = (1.0 - g.radius((i % w) as f32 + 0.5, (i / w) as f32 + 0.5)) * g.rx.min(g.ry);
-            (depth / BLEND_PX).clamp(0.0, 1.0) * r[i]
-        }
-        _ => 0.0,
+    let reach = if width > 0.0 {
+        max_reach
+    } else {
+        let curve: Vec<f32> = (1..=max_reach).map(|r| strongest(&fill(&smooth, cw, ch, &across, r))).collect();
+        let full = curve.iter().copied().fold(0.0f32, f32::max);
+        // The smallest window that fills almost all of it (wider ones reach other structures).
+        curve.iter().position(|&q| q >= 0.95 * full).map_or(max_reach, |k| k + 1)
     };
-    let r = p.window();
-    let channels = sharp
-        .channels()
-        .par_iter()
-        .enumerate()
-        .map(|(c, plane)| {
-            // A mono reference (LRGB) serves every channel.
-            let refp = &reference.channels()[c.min(reference.channels().len() - 1)];
-            let (lo, hi) = min_max(refp, w, h, r);
-            plane
-                .iter()
-                .enumerate()
-                .map(|(i, &s)| {
-                    let s = s - p.strength * lift(i);
-                    // The area (sharp edges, with the brush strokes) says where halos are held.
-                    let k = p.strength * weight[i];
-                    if k <= 0.0 {
-                        return s;
-                    }
-                    let margin = p.tolerance * (hi[i] - lo[i]);
-                    let held = s.clamp(lo[i] - margin, hi[i] + margin);
-                    s + k * (held - s)
-                })
-                .collect()
+    let lum_fill = fill(&smooth, cw, ch, &across, reach);
+    // The noise, from what the smoothing took away, and how strong the ring's fill is: where
+    // the fill stands clearly out of both is the ring.
+    let mut residual: Vec<f32> = painted_px.iter().map(|&i| (lum[i] - smooth[i]).abs()).collect();
+    let mid = residual.len() / 2;
+    let noise = 1.4826 * *residual.select_nth_unstable_by(mid, f32::total_cmp).1;
+    let top = strongest(&lum_fill);
+    let (lo, hi) = ((0.6 * noise).max(0.1 * top), (1.5 * noise).max(0.3 * top));
+    // The ring runs along the band: what is not there along most of it nearby (a belt or a
+    // spot crossing the band) is not the ring.
+    let along = along_quantile(&lum_fill, cw, ch, &across, (2 * reach).max(8), 0.5);
+    // The brush only says where the ring is: once found, it is lifted across its whole width,
+    // also where it runs a little outside the painted band.
+    let a = reach_across(&a, cw, ch, &across, reach);
+    let ring: Vec<f32> = (0..cw * ch)
+        .map(|i| {
+            let kept = along[i].min(2.0 * lum_fill[i]);
+            let t = ((kept - lo) / (hi - lo).max(1e-6)).clamp(0.0, 1.0);
+            a[i] * t * t * (3.0 - 2.0 * t) * (kept / lum_fill[i].max(1e-9)).min(1.0)
         })
         .collect();
-    Image::new(w, h, channels, sharp.source_bit_depth)
+    let ring = blur(&ring, cw, ch, 0.7);
+    // Back to the image's size.
+    let place = |part: &[f32]| -> Vec<f32> {
+        let mut out = vec![0.0f32; w * h];
+        for (y, row) in part.chunks(cw).enumerate() {
+            out[(y0 + y) * w + x0..(y0 + y) * w + x1].copy_from_slice(row);
+        }
+        out
+    };
+    // Smoothed a little along the ring, so it rises evenly.
+    let lift_of = |filled: &[f32]| place(&along_blur(&filled.iter().zip(&ring).map(|(f, r)| f * r).collect::<Vec<_>>(), cw, ch, &across, 1.0));
+    let map = lift_of(&lum_fill);
+    let lift = if img.channels().len() == 1 {
+        vec![map.clone()]
+    } else {
+        img.channels().par_iter().map(|c| lift_of(&fill(&along_blur(&crop(c), cw, ch, &across, SMOOTH), cw, ch, &across, reach))).collect()
+    };
+    Some(Ring { lift, map, reach })
 }
 
-/// The disk rings are removed from inside: Saturn's globe (from the rings' geometry), or the
-/// planet's outline as an ellipse. `None` for the rings, or when the subject isn't a whole disk
+/// Gaussian smoothing (σ px) of `plane` along the band (across `across`).
+fn along_blur(plane: &[f32], w: usize, h: usize, across: &[[f32; 2]], sigma: f32) -> Vec<f32> {
+    let reach = (3.0 * sigma).ceil() as i32;
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let [dx, dy] = across[i];
+            let (x, y) = ((i % w) as f32, (i / w) as f32);
+            let (mut sum, mut total) = (0.0f32, 0.0f32);
+            for s in -reach..=reach {
+                // Bilinear, so the line along a curved band stays on it.
+                if let Some(v) = bilinear(plane, w, h, x + 0.5 - s as f32 * dy, y + 0.5 + s as f32 * dx) {
+                    let g = (-(s * s) as f32 / (2.0 * sigma * sigma)).exp();
+                    (sum, total) = (sum + g * v, total + g);
+                }
+            }
+            if total > 0.0 { sum / total } else { plane[i] }
+        })
+        .collect()
+}
+
+/// `plane` at (x, y), pixel centres at half-integers; `None` outside.
+fn bilinear(plane: &[f32], w: usize, h: usize, x: f32, y: f32) -> Option<f32> {
+    let (x, y) = (x - 0.5, y - 0.5);
+    if x < 0.0 || y < 0.0 || x > (w - 1) as f32 || y > (h - 1) as f32 {
+        return None;
+    }
+    let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (tx, ty) = (x - x0 as f32, y - y0 as f32);
+    let top = plane[y0 * w + x0] * (1.0 - tx) + plane[y0 * w + x1] * tx;
+    let bottom = plane[y1 * w + x0] * (1.0 - tx) + plane[y1 * w + x1] * tx;
+    Some(top * (1.0 - ty) + bottom * ty)
+}
+
+/// Least-squares parabola v = a + b·t + c·t² through `points` (t, v): (a, b, c, rms misfit).
+fn parabola(points: &[(f32, f32)]) -> (f32, f32, f32, f32) {
+    let mut m = [[0.0f64; 3]; 3];
+    let mut y = [0.0f64; 3];
+    for &(t, v) in points {
+        let p = [1.0, t as f64, (t * t) as f64];
+        for r in 0..3 {
+            for c in 0..3 {
+                m[r][c] += p[r] * p[c];
+            }
+            y[r] += p[r] * v as f64;
+        }
+    }
+    let det = |m: &[[f64; 3]; 3]| m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let d = det(&m);
+    if d.abs() < 1e-12 {
+        return (0.0, 0.0, 0.0, f32::MAX);
+    }
+    let solve = |k: usize| {
+        let mut mk = m;
+        (0..3).for_each(|r| mk[r][k] = y[r]);
+        (det(&mk) / d) as f32
+    };
+    let (a, b, c) = (solve(0), solve(1), solve(2));
+    let misfit = (points.iter().map(|&(t, v)| (v - (a + b * t + c * t * t)).powi(2)).sum::<f32>() / points.len() as f32).sqrt();
+    (a, b, c, misfit)
+}
+
+/// The strongest value of `plane` within `reach` px across the band.
+fn reach_across(plane: &[f32], w: usize, h: usize, across: &[[f32; 2]], reach: usize) -> Vec<f32> {
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let [dx, dy] = across[i];
+            let (x, y) = ((i % w) as f32, (i / w) as f32);
+            (-(reach as i32)..=reach as i32).fold(0.0f32, |m, t| {
+                let (sx, sy) = ((x + t as f32 * dx).round(), (y + t as f32 * dy).round());
+                if sx < 0.0 || sy < 0.0 || sx >= w as f32 || sy >= h as f32 { m } else { m.max(plane[sy as usize * w + sx as usize]) }
+            })
+        })
+        .collect()
+}
+
+/// The `q` quantile of `plane` along the band (across `across`), `reach` px either way: a low
+/// one keeps only what is there along most of it.
+fn along_quantile(plane: &[f32], w: usize, h: usize, across: &[[f32; 2]], reach: usize, q: f32) -> Vec<f32> {
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let [dx, dy] = across[i];
+            let (x, y) = ((i % w) as f32, (i / w) as f32);
+            let mut v: Vec<f32> = (-(reach as i32)..=reach as i32)
+                .filter_map(|s| {
+                    let (sx, sy) = ((x - s as f32 * dy).round(), (y + s as f32 * dx).round());
+                    (sx >= 0.0 && sy >= 0.0 && sx < w as f32 && sy < h as f32).then(|| plane[sy as usize * w + sx as usize])
+                })
+                .collect();
+            let k = ((v.len() as f32 * q) as usize).min(v.len() - 1);
+            *v.select_nth_unstable_by(k, f32::total_cmp).1
+        })
+        .collect()
+}
+
+/// The direction across the ring at each pixel (unit vector). A ring follows the sharp edge
+/// that made it (the limb, a crater's rim), so this is mostly the direction of the image's
+/// gradient over about the band's width (a structure tensor); the painted band's own direction
+/// (its outline faces across it on both sides) helps where the image has no clear edge. A
+/// single dab of the brush has no direction of its own.
+fn across_band(area: &[f32], image: &[f32], w: usize, h: usize, band: f32) -> Vec<[f32; 2]> {
+    let reach = (0.6 * band).max(2.0);
+    let tensor = |plane: &[f32], pre: f32| -> [Vec<f32>; 3] {
+        let soft = blur(plane, w, h, pre);
+        let at = |x: usize, y: usize| soft[y.min(h - 1) * w + x.min(w - 1)];
+        let (mut xx, mut yy, mut xy) = (vec![0.0f32; w * h], vec![0.0f32; w * h], vec![0.0f32; w * h]);
+        for y in 0..h {
+            for x in 0..w {
+                let gx = 0.5 * (at(x + 1, y) - at(x.saturating_sub(1), y));
+                let gy = 0.5 * (at(x, y + 1) - at(x, y.saturating_sub(1)));
+                let i = y * w + x;
+                (xx[i], yy[i], xy[i]) = (gx * gx, gy * gy, gx * gy);
+            }
+        }
+        [blur(&xx, w, h, reach), blur(&yy, w, h, reach), blur(&xy, w, h, reach)]
+    };
+    let [ixx, iyy, ixy] = tensor(image, 1.0);
+    let [axx, ayy, axy] = tensor(area, 1.0);
+    // The image's direction counts fully on a clear edge, little where it is flat (there its
+    // direction is the noise's); the band's counts for its direction only.
+    let mut traces: Vec<f32> = (0..w * h).map(|i| ixx[i] + iyy[i]).collect();
+    let mid = traces.len() / 2;
+    let typical = traces.select_nth_unstable_by(mid, f32::total_cmp).1.max(1e-12);
+    (0..w * h)
+        .map(|i| {
+            let (ni, na) = (1.0 / (ixx[i] + iyy[i] + typical), 0.5 / (axx[i] + ayy[i]).max(1e-12));
+            let (xx, yy, xy) = (ixx[i] * ni + axx[i] * na, iyy[i] * ni + ayy[i] * na, ixy[i] * ni + axy[i] * na);
+            let angle = 0.5 * (2.0 * xy).atan2(xx - yy);
+            [angle.cos(), angle.sin()]
+        })
+        .collect()
+}
+
+/// How much a dark valley running along the band, about `r` px wide on either side, sits below
+/// its surroundings at each pixel of `plane` (≥ 0), looking only along `across`. A belt crossing
+/// the band is not a valley along this direction.
+///
+/// Two estimates of what lies under the valley:
+/// - the lower of its two sides (a closing): always safe — a step edge such as the limb, a
+///   shadow's border, a convex disk are not raised — but on a slope (the limb darkening) it fills
+///   only up to the lower side;
+/// - a parabola through the surroundings on both sides (from `r` to `2r` px away): it follows
+///   a slope and its bend (the limb darkening, the fading tail of an edge, which is then not
+///   mistaken for a valley), and is trusted only where the two sides continue one another
+///   (beside a step edge they do not, and it would raise the edge's foot).
+fn fill(plane: &[f32], w: usize, h: usize, across: &[[f32; 2]], r: usize) -> Vec<f32> {
+    let offset = |i: usize, t: f32| -> Option<usize> {
+        let [dx, dy] = across[i];
+        let (sx, sy) = (((i % w) as f32 + t * dx).round(), ((i / w) as f32 + t * dy).round());
+        (sx >= 0.0 && sy >= 0.0 && sx < w as f32 && sy < h as f32).then(|| sy as usize * w + sx as usize)
+    };
+    let extreme = |src: &[f32], i: usize, pick: fn(f32, f32) -> f32, start: f32| -> f32 { (-(r as i32)..=r as i32).filter_map(|t| offset(i, t as f32)).fold(start, |acc, j| pick(acc, src[j])) };
+    let dilated: Vec<f32> = (0..w * h).into_par_iter().map(|i| extreme(plane, i, f32::max, f32::MIN)).collect();
+    let closing: Vec<f32> = (0..w * h).into_par_iter().map(|i| (extreme(&dilated, i, f32::min, f32::MAX) - plane[i]).max(0.0)).collect();
+    // At each pixel taken as the valley's centre: the parabola through the surroundings (value
+    // here, slope and bend along `across`) and how much to trust it (0‥1) times the dip under it.
+    let far = 2 * r as i32;
+    let lines: Vec<(f32, f32, f32, f32)> = (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let points: Vec<(f32, f32)> = (-far..=far).filter(|t| t.unsigned_abs() as usize >= r).filter_map(|t| offset(i, t as f32).map(|j| (t as f32, plane[j]))).collect();
+            if points.iter().filter(|p| p.0 < 0.0).count() < 2 || points.iter().filter(|p| p.0 > 0.0).count() < 2 {
+                return (0.0, 0.0, 0.0, 0.0);
+            }
+            let fit = |pts: &[(f32, f32)]| -> (f32, f32, f32) {
+                let n = pts.len() as f32;
+                let (mt, mv) = pts.iter().fold((0.0, 0.0), |(a, b), p| (a + p.0 / n, b + p.1 / n));
+                let (stt, stv) = pts.iter().fold((0.0, 0.0), |(a, b), p| (a + (p.0 - mt).powi(2), b + (p.0 - mt) * (p.1 - mv)));
+                let slope = stv / stt.max(1e-6);
+                let here = mv - slope * mt;
+                let misfit = (pts.iter().map(|p| (p.1 - (here + slope * p.0)).powi(2)).sum::<f32>() / n).sqrt();
+                (here, slope, misfit)
+            };
+            let (here, slope, curve, misfit) = parabola(&points);
+            let split = points.iter().position(|p| p.0 > 0.0).unwrap_or(points.len());
+            let ((_, left, left_misfit), (_, right, right_misfit)) = (fit(&points[..split]), fit(&points[split..]));
+            // The surroundings must continue one another: on both sides the same slope (a ring on
+            // the limb darkening), or both flat. Beside a step edge hidden under the valley they
+            // do not (the planet's side falls, the sky's is flat), and the line would raise it.
+            let noise = 2.0 * left_misfit.max(right_misfit) / r as f32;
+            let (gentle, steep) = (left.abs().min(right.abs()), left.abs().max(right.abs()));
+            let agree = if steep < noise {
+                ((2.0 * noise - slope.abs()) / noise).clamp(0.0, 1.0)
+            } else if left * right > 0.0 {
+                ((gentle / steep - 0.15) / 0.2).clamp(0.0, 1.0) * ((1.5 * steep + noise - slope.abs()) / noise).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let step = 1.0 - agree;
+            let dip = here - plane[i];
+            let t = ((dip / misfit.max(1e-6) - 2.0) / 2.0).clamp(0.0, 1.0) * (1.0 - step);
+            (here, slope, curve, t * t * (3.0 - 2.0 * t) * dip.max(0.0))
+        })
+        .collect();
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let v = plane[i];
+            // The best-centred trusted parabola nearby, carried to this pixel.
+            let best = (-(r as i32)..=r as i32).filter_map(|t| offset(i, t as f32).map(|j| (t as f32, j))).max_by(|a, b| lines[a.1].3.total_cmp(&lines[b.1].3));
+            let line = best.filter(|&(_, j)| lines[j].3 > 0.0).map_or(0.0, |(t, j)| {
+                let (here, slope, curve, score) = lines[j];
+                let dip = here - plane[j];
+                // This pixel lies -t·cos(angle between the two directions) from it along its own.
+                let along = -t * (across[i][0] * across[j][0] + across[i][1] * across[j][1]);
+                // Never above the brightest of its surroundings.
+                (score / dip.max(1e-6)) * ((here + slope * along + curve * along * along).min(dilated[i]) - v)
+            });
+            closing[i].max(line)
+        })
+        .collect()
+}
+
+/// `sharp` with the ring lifted: `ring` is [`find_ring`] on it (computed here if `None`),
+/// `area` the painted coverage.
+pub fn dering(sharp: &Image, p: &DeringParams, area: &[f32], ring: Option<&Ring>) -> Image {
+    let own;
+    let ring = match ring {
+        Some(r) => Some(r),
+        None if !p.is_neutral() => {
+            own = find_ring(sharp, area, p.width);
+            own.as_ref()
+        }
+        None => None,
+    };
+    let Some(ring) = ring.filter(|r| !p.is_neutral() && r.lift.len() == sharp.channels().len() && r.map.len() == sharp.width() * sharp.height()) else {
+        return sharp.clone();
+    };
+    let channels = sharp.channels().par_iter().zip(&ring.lift).map(|(plane, lift)| plane.iter().zip(lift).map(|(v, l)| v + p.strength * l).collect()).collect();
+    Image::new(sharp.width(), sharp.height(), channels, sharp.source_bit_depth)
+}
+
+/// Gaussian blur (σ px) of a small plane, the borders extended.
+fn blur(plane: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+    let rows: Vec<f32> = plane.par_chunks(w).flat_map_iter(|row| gaussian_1d(row, sigma)).collect();
+    let mut cols = vec![0.0f32; w * h];
+    let done: Vec<Vec<f32>> = (0..w).into_par_iter().map(|x| gaussian_1d(&(0..h).map(|y| rows[y * w + x]).collect::<Vec<_>>(), sigma)).collect();
+    for (x, col) in done.iter().enumerate() {
+        for (y, v) in col.iter().enumerate() {
+            cols[y * w + x] = *v;
+        }
+    }
+    cols
+}
+
+/// The disk deconvolution's anti-ringing area follows: Saturn's globe (from the rings'
+/// geometry), or the planet's outline as an ellipse. `None` for the rings, or when the subject isn't a whole disk
 /// (a close-up running off the frame).
 pub fn find_globe(image: &Image, region: DeringRegion) -> Option<Ellipse> {
     match region {
@@ -243,147 +537,8 @@ fn fit_limb(lum: &[f32], w: usize, h: usize, globe: Ellipse) -> Ellipse {
     Ellipse { rx: globe.rx * scale, ry: globe.ry * scale, ..globe }
 }
 
-/// Pixels below the limb over which the concentric correction comes in.
-const BLEND_PX: f32 = 3.0;
-
-/// Angular sectors the limb is divided into.
-const SECTORS: usize = 36;
-/// Sectors on each side whose pixels join a sector's median: an arc of 70°, long enough that
-/// belts and spots cross it while rings run along it.
-const ARC: i32 = 3;
-
-/// How much of what sharpening changed (`sharp` − `reference`, luminance) is concentric dark
-/// rings: the median change along an arc around each sector at each depth below the limb
-/// (1 px steps, down to `depth` of the radius) gives a radial profile per sector; its dips
-/// and whatever falls below the reference are the rings. Smoothed across neighbouring
-/// sectors, faded out towards the deepest band; zero outside the disk and below that depth.
-/// `rind`: how much of the bright rind along the limb also counts (0‥1).
-pub fn concentric_rings(sharp: &[f32], reference: &[f32], w: usize, h: usize, globe: &Ellipse, depth: f32, rind: f32) -> Vec<f32> {
-    let max_depth = (depth.clamp(0.05, 0.9) * globe.rx.min(globe.ry)).max(3.0);
-    let bins = max_depth.ceil() as usize;
-    let (sin, cos) = globe.angle.sin_cos();
-    // Sector (fractional) and depth (px) of a pixel, if it lies in the band.
-    let locate = |x: usize, y: usize| -> Option<(f32, f32)> {
-        let (dx, dy) = (x as f32 + 0.5 - globe.cx, y as f32 + 0.5 - globe.cy);
-        let (u, v) = (dx * cos + dy * sin, -dx * sin + dy * cos);
-        let rho = ((u / globe.rx).powi(2) + (v / globe.ry).powi(2)).sqrt();
-        if !(0.05..1.0).contains(&rho) {
-            return None;
-        }
-        let depth_px = (1.0 - rho) * u.hypot(v) / rho;
-        if depth_px >= max_depth {
-            return None;
-        }
-        let theta = (v / globe.ry).atan2(u / globe.rx);
-        Some(((theta + std::f32::consts::PI) / std::f32::consts::TAU * SECTORS as f32, depth_px))
-    };
-    // The band's bounding box.
-    let reach_x = (globe.rx.max(globe.ry) + 2.0) as usize;
-    let (x0, x1) = ((globe.cx as usize).saturating_sub(reach_x), (globe.cx as usize + reach_x).min(w));
-    let (y0, y1) = ((globe.cy as usize).saturating_sub(reach_x), (globe.cy as usize + reach_x).min(h));
-    let mut cells: Vec<Vec<f32>> = vec![Vec::new(); SECTORS * bins];
-    for y in y0..y1 {
-        for x in x0..x1 {
-            if let Some((sector, d)) = locate(x, y) {
-                let i = y * w + x;
-                cells[(sector as usize % SECTORS) * bins + (d as usize).min(bins - 1)].push(sharp[i] - reference[i]);
-            }
-        }
-    }
-    let medians: Vec<Option<f32>> = (0..SECTORS * bins)
-        .into_par_iter()
-        .map(|k| {
-            let (s, b) = (k / bins, k % bins);
-            let mut arc: Vec<f32> = (-ARC..=ARC).flat_map(|o| &cells[(s as i32 + o).rem_euclid(SECTORS as i32) as usize * bins + b]).copied().collect();
-            (arc.len() >= 5).then(|| {
-                let mid = arc.len() / 2;
-                *arc.select_nth_unstable_by(mid, f32::total_cmp).1
-            })
-        })
-        .collect();
-    // What of each sector's radial profile is ringing. Dark rings: the profile should be its
-    // closing (narrow dips filled) and never below the reference. The bright rind: a boost
-    // near the limb above the level deeper in, which makes the plainer band behind it look
-    // dark, is brought down towards that level by `rind`.
-    let reach = (0.08 * globe.rx.min(globe.ry)).max(4.0) as usize;
-    let mut artifacts: Vec<Option<f32>> = vec![None; SECTORS * bins];
-    for s in 0..SECTORS {
-        let d = &medians[s * bins..(s + 1) * bins];
-        let window = |b: usize| d[b.saturating_sub(reach)..(b + reach + 1).min(bins)].iter().flatten().copied();
-        let dilated: Vec<Option<f32>> = (0..bins).map(|b| window(b).reduce(f32::max)).collect();
-        let closed: Vec<Option<f32>> = (0..bins).map(|b| d[b].map(|v| dilated[b.saturating_sub(reach)..(b + reach + 1).min(bins)].iter().flatten().copied().fold(v, f32::min).max(0.0))).collect();
-        for b in 0..bins {
-            if let (Some(v), Some(c)) = (d[b], closed[b]) {
-                let deeper = closed[b..].iter().flatten().copied().fold(c, f32::min);
-                artifacts[s * bins + b] = Some(v - (c - rind * (c - deeper)));
-            }
-        }
-    }
-    let medians = artifacts;
-    // Smooth across sectors (rings change slowly around the limb), fade out at the deepest bins.
-    let profile: Vec<f32> = (0..SECTORS * bins)
-        .map(|k| {
-            let (s, b) = (k / bins, k % bins);
-            let (mut sum, mut weight) = (0.0f32, 0.0f32);
-            for (offset, wgt) in [(-1i32, 1.0f32), (0, 2.0), (1, 1.0)] {
-                let neighbour = (s as i32 + offset).rem_euclid(SECTORS as i32) as usize;
-                if let Some(m) = medians[neighbour * bins + b] {
-                    (sum, weight) = (sum + wgt * m, weight + wgt);
-                }
-            }
-            let fade = ((bins as f32 - b as f32) / (0.25 * bins as f32)).clamp(0.0, 1.0);
-            if weight > 0.0 { fade * sum / weight } else { 0.0 }
-        })
-        .collect();
-    let mut out = vec![0.0f32; w * h];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        if !(y0..y1).contains(&y) {
-            return;
-        }
-        for (x, o) in row.iter_mut().enumerate().take(x1).skip(x0) {
-            if let Some((sector, d)) = locate(x, y) {
-                // Bilinear in (sector, depth).
-                let s0 = (sector - 0.5).floor();
-                let t = sector - 0.5 - s0;
-                let sa = (s0 as i32).rem_euclid(SECTORS as i32) as usize;
-                let sb = (sa + 1) % SECTORS;
-                // Bins are centred half a pixel in.
-                let d = (d - 0.5).max(0.0);
-                let b0 = (d.floor() as usize).min(bins - 1);
-                let b1 = (b0 + 1).min(bins - 1);
-                let u = d - d.floor();
-                let at = |s: usize, b: usize| profile[s * bins + b];
-                let near = at(sa, b0) * (1.0 - u) + at(sa, b1) * u;
-                let far = at(sb, b0) * (1.0 - u) + at(sb, b1) * u;
-                *o = near * (1.0 - t) + far * t;
-            }
-        }
-    });
-    out
-}
-
-/// Where sharpening left rings: how far (in brightness) the luminance of `sharp` lies outside
-/// the range `reference` has around each pixel, with the same radius and tolerance as
-/// deringing. Zero where there is nothing to correct.
-pub fn ringing_map(sharp: &Image, reference: &Image, p: &DeringParams) -> Vec<f32> {
-    let (w, h) = (sharp.width(), sharp.height());
-    if (reference.width(), reference.height()) != (w, h) {
-        return vec![0.0; w * h];
-    }
-    let s = working_planes(sharp, ColorMode::Luminance).swap_remove(0);
-    let r = working_planes(reference, ColorMode::Luminance).swap_remove(0);
-    let (lo, hi) = min_max(&r, w, h, p.window());
-    s.par_iter()
-        .enumerate()
-        .map(|(i, &v)| {
-            let margin = p.tolerance * (hi[i] - lo[i]);
-            (lo[i] - margin - v).max(v - hi[i] - margin).max(0.0)
-        })
-        .collect()
-}
-
-/// Where halos are held (0‥1): near the reference's sharp edges, within the region, plus the
-/// brush strokes.
+/// Where deconvolution's anti-ringing holds its estimate (0‥1): near the image's sharp edges,
+/// within the region (on a whole planet, a band along its limb).
 pub fn weight(image: &Image, p: &DeringParams) -> Vec<f32> {
     let (w, h) = (image.width(), image.height());
     let lum = working_planes(image, ColorMode::Luminance).swap_remove(0);
@@ -396,28 +551,34 @@ pub fn weight(image: &Image, p: &DeringParams) -> Vec<f32> {
     let bright = sample.select_nth_unstable_by((n * 995 / 1000).min(n - 1), f32::total_cmp).1.max(1e-3);
     let (from, to) = (p.edges.max(0.0), 2.0 * p.edges.max(0.0) + 0.05);
     let globe = match p.region {
-        DeringRegion::Subject => None,
+        // A whole planet: its limb.
+        DeringRegion::Subject => find_globe(image, DeringRegion::Subject),
         _ => find_globe(image, DeringRegion::Globe),
     };
     // The globe and its limb's halo (Globe), or what is outside it (Rings).
     let margin = globe.map_or(0.0, |g| (p.radius as f32 + 2.0) / g.rx.min(g.ry));
-    let mut area: Vec<f32> = (0..w * h)
+    // On a whole planet only a band along the limb, `radius` px deep inside it (the dark ring
+    // sharpening draws there) and the sky beside it: belts and spots further in, whose edges can
+    // be as marked, are not ringing.
+    let band = p.radius as f32 + 2.0;
+    (0..w * h)
         .into_par_iter()
         .map(|i| {
-            let inside = globe.map(|g| g.radius((i % w) as f32 + 0.5, (i / w) as f32 + 0.5));
-            let allowed = match (p.region, inside) {
-                (DeringRegion::Globe, Some(rho)) => ((1.0 + margin - rho) / margin.max(1e-3)).clamp(0.0, 1.0),
-                (DeringRegion::Rings, Some(rho)) => ((rho - 1.0) / 0.03).clamp(0.0, 1.0),
-                _ => 1.0,
+            let allowed = match globe {
+                Some(g) => {
+                    let rho = g.radius((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
+                    match p.region {
+                        DeringRegion::Globe => ((1.0 + margin - rho) / margin.max(1e-3)).clamp(0.0, 1.0),
+                        DeringRegion::Rings => ((rho - 1.0) / 0.03).clamp(0.0, 1.0),
+                        DeringRegion::Subject => ((band - (1.0 - rho) * g.rx.min(g.ry)) / 2.0).clamp(0.0, 1.0),
+                    }
+                }
+                None => 1.0,
             };
             let t = (((hi[i] - lo[i]) / bright - from) / (to - from)).clamp(0.0, 1.0);
             allowed * t * t * (3.0 - 2.0 * t)
         })
-        .collect();
-    for stroke in &p.strokes {
-        mask::paint(&mut area, w, h, stroke);
-    }
-    area
+        .collect()
 }
 
 /// Minimum and maximum over the (2r+1)² square around each pixel. Both passes combine whole
@@ -456,118 +617,158 @@ pub(crate) fn min_max_cpu(plane: &[f32], w: usize, h: usize, r: usize) -> (Vec<f
     (lo, hi)
 }
 
+/// Gaussian smoothing of a row (σ in samples), the ends extended.
+fn gaussian_1d(row: &[f32], sigma: f32) -> Vec<f32> {
+    let r = (3.0 * sigma).ceil() as i32;
+    let kernel: Vec<f32> = (-r..=r).map(|k| (-(k as f32).powi(2) / (2.0 * sigma * sigma)).exp()).collect();
+    let total: f32 = kernel.iter().sum();
+    let n = row.len() as i32;
+    (0..n).map(|i| (-r..=r).zip(&kernel).map(|(k, g)| g * row[(i + k).clamp(0, n - 1) as usize]).sum::<f32>() / total).collect()
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::fft::FftConvolver;
     use crate::psf::Psf;
 
-    const N: usize = 160;
-    const R: f32 = 50.0;
+    const S: usize = 260;
+    const RD: f32 = 100.0;
 
-    /// A blurred, slightly limb-darkened disk, and an over-sharpened copy that rings.
-    fn disk() -> (Image, Image) {
-        let c = N as f32 / 2.0;
-        let plane: Vec<f32> = (0..N * N)
+    fn at(i: usize) -> (f32, f32) {
+        let c = S as f32 / 2.0;
+        ((i % S) as f32 + 0.5 - c, (i / S) as f32 + 0.5 - c)
+    }
+
+    /// A blurred limb-darkened disk with belts 40 px apart (parallel to the equator) and noise;
+    /// `sharpen` adds an unsharp mask (a bright rim on the limb); `ring` a dark ring that is a
+    /// shifted copy of the limb (7–11 px inside, σ 1.3 px), on the right half only. Returns
+    /// (image, the ring's darkening).
+    fn planet(ring: bool, sharpen: bool, colour: bool) -> (Image, Vec<f32>) {
+        let noise = |i: usize| ((i.wrapping_mul(2_654_435_761) >> 7) % 1000) as f32 / 1000.0 - 0.5;
+        let plane: Vec<f32> = (0..S * S)
             .map(|i| {
-                let d = (((i % N) as f32 - c).powi(2) + ((i / N) as f32 - c).powi(2)).sqrt() / R;
-                if d < 1.0 { 0.7 * (1.0 - d * d).powf(0.15) } else { 0.0 }
+                let (dx, dy) = at(i);
+                let r = dx.hypot(dy) / RD;
+                let belts = 0.05 * (dy / 40.0 * std::f32::consts::TAU).sin();
+                if r < 1.0 { 0.75 * (1.0 - r * r).powf(0.25) + belts } else { 0.02 }
             })
             .collect();
-        let blur = |p: &[f32], s: f32| FftConvolver::new(N, N, &Psf::Gaussian { sigma: s }.kernel()).convolve(p);
-        let reference = blur(&plane, 2.0);
-        // Strong unsharp mask: overshoot on the edge, a dark ring inside, a halo outside.
-        let soft = blur(&reference, 3.0);
-        let sharp: Vec<f32> = reference.iter().zip(&soft).map(|(r, s)| r + 2.5 * (r - s)).collect();
-        (Image::new(N, N, vec![sharp], 16), Image::new(N, N, vec![reference], 16))
+        let blur = |p: &[f32], s: f32| FftConvolver::new(S, S, &Psf::Gaussian { sigma: s }.kernel()).convolve(p);
+        let reference = blur(&plane, 1.5);
+        let soft = blur(&reference, 2.0);
+        let darkening: Vec<f32> = (0..S * S)
+            .map(|i| {
+                let (dx, dy) = at(i);
+                if !ring || dx.hypot(dy) > RD {
+                    return 0.0;
+                }
+                let strength = 0.08 * dx.max(0.0) / dx.hypot(dy).max(1.0);
+                let r = (dx + 2.0).hypot(dy);
+                -strength * (-((r - (RD - 9.0)) / 1.3).powi(2) / 2.0).exp()
+            })
+            .collect();
+        let gain = if sharpen { 1.2 } else { 0.0 };
+        let out: Vec<f32> = (0..S * S).map(|i| reference[i] + gain * (reference[i] - soft[i]) + darkening[i] + 0.008 * noise(i)).collect();
+        let image = if colour { Image::new(S, S, vec![out.iter().map(|v| v * 1.1).collect(), out.clone(), out.iter().map(|v| v * 0.8).collect()], 16) } else { Image::new(S, S, vec![out], 16) };
+        (image, darkening)
     }
 
-    /// Along the row through the centre: (how far the brightest point near the limb rises
-    /// above the reference's, largest excursion in the sky, centre value).
-    fn profile(img: &Image, reference: &Image) -> (f32, f32, f32) {
-        let row = N / 2;
-        let at = |im: &Image, x: usize| im.channels()[0][row * N + x];
-        let c = N / 2;
-        let limb = c + R as usize;
-        let peak = |im: &Image| (limb - 12..limb).map(|x| at(im, x)).fold(f32::MIN, f32::max);
-        let overshoot = peak(img) - peak(reference);
-        let sky = (limb + 3..N - 4).map(|x| at(img, x).abs()).fold(f32::MIN, f32::max);
-        (overshoot, sky, at(img, c))
+    /// A rough stroke along the right half of the ring, wobbling ±2 px around it.
+    fn rough_stroke(radius: f32) -> Stroke {
+        let c = S as f32 / 2.0;
+        let points = (0..=40)
+            .map(|k| {
+                let theta = (-80.0 + 4.0 * k as f32).to_radians();
+                let r = RD - 9.0 + 2.0 * (k as f32 * 1.7).sin();
+                [c - 2.0 + r * theta.cos(), c + r * theta.sin()]
+            })
+            .collect();
+        Stroke { points, radius, hardness: 0.5, erase: false }
     }
 
+    fn painted_params(radius: f32) -> DeringParams {
+        DeringParams { strokes: vec![rough_stroke(radius)], ..Default::default() }
+    }
+
+    /// Painted roughly over it, the ring goes; the limb's bright rim, the belts and what lies
+    /// outside the brush stay.
     #[test]
-    fn removes_the_rings_and_keeps_the_disk() {
-        let (sharp, reference) = disk();
-        let p = DeringParams::for_blur(2.0);
-        let out = dering(&sharp, &reference, &DeringParams { strength: 1.0, ..p }, None, None);
-        let (over_before, sky_before, centre_before) = profile(&sharp, &reference);
-        let (over_after, sky_after, centre_after) = profile(&out, &reference);
-        assert!(over_before > 0.03 && sky_before > 0.02, "the test image must ring: {over_before} {sky_before}");
-        assert!(over_after < 0.5 * over_before, "bright rind {over_before} → {over_after}");
-        assert!(sky_after < 0.3 * sky_before, "halo {sky_before} → {sky_after}");
-        assert_eq!(centre_after, centre_before, "the inside of the disk is not touched");
-    }
-
-    /// Richardson–Lucy with a PSF 40 % too large rings at the limb; deringing removes most
-    /// of it.
-    #[test]
-    fn tames_richardson_lucy_ringing() {
-        use crate::deconv::{DeconvParams, deconvolve_plane};
-        let (_, reference) = disk();
-        let p = DeconvParams { psf: Psf::Gaussian { sigma: 2.8 }, iterations: 40, tv_lambda: 0.0, damping: 0.0, ..Default::default() };
-        let plane = deconvolve_plane(&reference.channels()[0], N, N, &p, &|| false, &|_| {}).unwrap();
-        let sharp = Image::new(N, N, vec![plane], 16);
-        let out = dering(&sharp, &reference, &DeringParams { strength: 1.0, ..DeringParams::for_blur(2.0) }, None, None);
-        let (over_before, sky_before, _) = profile(&sharp, &reference);
-        let (over_after, sky_after, _) = profile(&out, &reference);
-        assert!(over_after < 0.5 * over_before.max(1e-3), "rind {over_before} → {over_after}");
-        assert!(sky_after <= sky_before, "halo {sky_before} → {sky_after}");
-    }
-
-    /// The ringing seen on real Saturns: a dark band concentric with the limb, a few pixels
-    /// inside, on one side only. It goes; the belts sharpening brought out stay.
-    #[test]
-    fn removes_a_one_sided_concentric_band_and_keeps_the_belts() {
-        let c = N as f32 / 2.0;
-        let polar = |i: usize| {
-            let (dx, dy) = ((i % N) as f32 + 0.5 - c, (i / N) as f32 + 0.5 - c);
-            (dx.hypot(dy), dy.atan2(dx), dy)
-        };
-        let belts = |dy: f32| 0.05 * (dy / 7.0).sin();
-        let reference: Vec<f32> = (0..N * N).map(|i| if polar(i).0 < R { 0.6 + belts(polar(i).2) } else { 0.0 }).collect();
-        // The band: about 3 px wide, 8 px below the limb, strongest on the left and gone by the
-        // top and bottom.
-        let band = |i: usize| {
-            let (r, theta, _) = polar(i);
-            let side = (-theta.cos()).max(0.0);
-            -0.08 * side * (-((r - (R - 8.0)) / 1.5).powi(2)).exp()
-        };
-        let sharp: Vec<f32> = (0..N * N).map(|i| if polar(i).0 < R { reference[i] + belts(polar(i).2) + band(i) } else { 0.0 }).collect();
-        let (sharp, reference) = (Image::new(N, N, vec![sharp], 16), Image::new(N, N, vec![reference], 16));
-        let out = dering(&sharp, &reference, &DeringParams { strength: 1.0, rind: 0.0, ..Default::default() }, None, None);
-        let (out, sharp, reference) = (&out.channels()[0], &sharp.channels()[0], &reference.channels()[0]);
-        let (mut band_before, mut band_after, mut belt_before, mut belt_after) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-        for i in 0..N * N {
-            let (r, theta, _) = polar(i);
-            if band(i) < -0.04 {
-                band_before += (sharp[i] - reference[i] - belts(polar(i).2)).abs();
-                band_after += (out[i] - reference[i] - belts(polar(i).2)).abs();
-            } else if r < R - 2.0 && theta.cos() < -0.7 {
-                // The belts on the band's side, where they cross the limb's arcs.
-                belt_before += (sharp[i] - reference[i]).abs();
-                belt_after += (out[i] - reference[i]).abs();
+    fn lifts_the_painted_ring_and_nothing_else() {
+        let (sharp, ring) = planet(true, true, false);
+        let (clean, _) = planet(false, true, false);
+        let p = painted_params(6.0);
+        let area = painted(&p.strokes, S, S);
+        let found = find_ring(&sharp, &area, 0.0).expect("painted");
+        let out = dering(&sharp, &p, &area, Some(&found));
+        let (out, sharp, clean) = (&out.channels()[0], &sharp.channels()[0], &clean.channels()[0]);
+        let (mut before, mut after, mut rim, mut beside, mut beside_n) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0usize);
+        for i in 0..S * S {
+            let (dx, dy) = at(i);
+            let r = dx.hypot(dy);
+            if ring[i] < -0.03 && area[i] > 0.9 {
+                before += (sharp[i] - clean[i]).abs();
+                after += (out[i] - clean[i]).abs();
+            }
+            if (r - RD).abs() < 2.0 {
+                rim = rim.max((out[i] - sharp[i]).abs());
+            }
+            if dx > 0.0 && ring[i] > -0.001 && area[i] > 0.0 {
+                beside += (out[i] - sharp[i]).abs();
+                beside_n += 1;
+            }
+            if area[i] == 0.0 && (r - (RD - 9.0)).abs() > 20.0 {
+                assert_eq!(out[i], sharp[i], "outside the brush at {dx} {dy}");
             }
         }
-        assert!(band_after < 0.3 * band_before, "band {band_before} → {band_after}");
-        assert!(belt_after > 0.8 * belt_before, "belts {belt_before} → {belt_after}");
+        assert!(after < 0.25 * before, "ring {before} → {after} (reach {})", found.reach);
+        assert!(rim < 0.01, "limb rim changed by {rim}");
+        assert!(beside / (beside_n as f32) < 0.002, "around the ring changed by {}", beside / beside_n as f32);
+    }
+
+    /// Painted where there is no ring (along the limb, and a dab across its edge), almost
+    /// nothing is lifted.
+    #[test]
+    fn no_ring_no_change() {
+        let (image, _) = planet(false, false, false);
+        for stroke in [rough_stroke(6.0), Stroke { points: vec![[222.0, 130.0], [234.0, 130.0]], radius: 6.0, hardness: 0.5, erase: false }] {
+            let p = DeringParams { strokes: vec![stroke], ..Default::default() };
+            let out = dering(&image, &p, &painted(&p.strokes, S, S), None);
+            let worst = out.channels()[0].iter().zip(&image.channels()[0]).map(|(a, b)| a - b).fold(0.0f32, f32::max);
+            assert!(worst < 0.01, "lifted {worst} where there is no ring");
+        }
+    }
+
+    /// In colour each channel is lifted by its own ring.
+    #[test]
+    fn colour_channels_are_lifted_on_their_own() {
+        let (sharp, ring) = planet(true, true, true);
+        let p = painted_params(6.0);
+        let area = painted(&p.strokes, S, S);
+        let out = dering(&sharp, &p, &area, None);
+        let deepest = (0..S * S).min_by(|&a, &b| ring[a].total_cmp(&ring[b])).unwrap();
+        let lifts: Vec<f32> = (0..3).map(|c| out.channels()[c][deepest] - sharp.channels()[c][deepest]).collect();
+        assert!(lifts[0] > lifts[1] && lifts[1] > lifts[2] && lifts[2] > 0.03, "{lifts:?}");
+    }
+
+    #[test]
+    fn nothing_painted_or_zero_strength_is_identity() {
+        let (sharp, _) = planet(true, true, false);
+        let none = DeringParams::default();
+        assert!(none.is_neutral());
+        assert_eq!(dering(&sharp, &none, &vec![0.0; S * S], None).channels(), sharp.channels());
+        let p = DeringParams { strength: 0.0, ..painted_params(6.0) };
+        assert_eq!(dering(&sharp, &p, &painted(&p.strokes, S, S), None).channels(), sharp.channels());
     }
 
     #[test]
     fn finds_the_disk() {
-        let (_, reference) = disk();
+        let (reference, _) = planet(false, false, false);
         let g = find_globe(&reference, DeringRegion::Subject).expect("a whole disk");
-        assert!((g.cx - N as f32 / 2.0).abs() < 1.0 && (g.cy - N as f32 / 2.0).abs() < 1.0, "{g:?}");
-        assert!((g.rx - R).abs() < 2.5 && (g.ry - R).abs() < 2.5, "{g:?}");
+        assert!((g.cx - S as f32 / 2.0).abs() < 1.0 && (g.cy - S as f32 / 2.0).abs() < 1.0, "{g:?}");
+        assert!((g.rx - RD).abs() < 2.5 && (g.ry - RD).abs() < 2.5, "{g:?}");
     }
 
     #[test]
@@ -614,49 +815,4 @@ mod tests {
         assert!(rings[200 * w + 350 + 226] > 0.5, "rings area follows their outer edge");
     }
 
-    /// The dark band sharpening leaves next to a bright edge crossing the disk (Saturn's rings
-    /// in front of the globe) is held back; a soft belt, without a sharp edge, is not touched.
-    #[test]
-    fn holds_the_halo_beside_an_edge_and_leaves_belts() {
-        let (w, h) = (160usize, 120usize);
-        let plane: Vec<f32> = (0..w * h)
-            .map(|i| {
-                let y = (i / w) as f32;
-                let ring = if (55.0..62.0).contains(&y) { 0.25 } else { 0.0 };
-                let belt = 0.04 * (-((y - 95.0) / 6.0).powi(2)).exp();
-                0.5 + ring - belt
-            })
-            .collect();
-        let blur = |p: &[f32], s: f32| FftConvolver::new(w, h, &Psf::Gaussian { sigma: s }.kernel()).convolve(p);
-        let reference = blur(&plane, 1.5);
-        let soft = blur(&reference, 3.0);
-        let sharp: Vec<f32> = reference.iter().zip(&soft).map(|(r, s)| r + 2.0 * (r - s)).collect();
-        let (sharp, reference) = (Image::new(w, h, vec![sharp], 16), Image::new(w, h, vec![reference], 16));
-        let out = dering(&sharp, &reference, &DeringParams { strength: 1.0, depth: 0.0, ..DeringParams::for_blur(1.5) }, None, None);
-        let column = |img: &Image, y: usize| img.channels()[0][y * w + w / 2];
-        // Below the ring: how far under the globe's level the darkest point goes.
-        let under = |img: &Image| (62..80).map(|y| 0.5 - column(img, y)).fold(0.0f32, f32::max);
-        assert!(under(&sharp) > 0.03, "the test image must ring: {}", under(&sharp));
-        assert!(under(&out) < 0.5 * under(&sharp), "halo {} → {}", under(&sharp), under(&out));
-        let belt = |img: &Image| column(img, 80) - column(img, 95);
-        assert!(belt(&out) > 0.95 * belt(&sharp), "belt {} → {}", belt(&sharp), belt(&out));
-    }
-
-    #[test]
-    fn ringing_map_finds_the_rings_and_not_the_inside() {
-        let (sharp, reference) = disk();
-        let map = ringing_map(&sharp, &reference, &DeringParams::for_blur(2.0));
-        let row = N / 2;
-        let limb = N / 2 + R as usize;
-        let near = (limb - 6..limb + 6).map(|x| map[row * N + x]).fold(0.0f32, f32::max);
-        assert!(near > 0.02, "rings at the limb: {near}");
-        assert!(map[row * N + N / 2] < 0.1 * near, "next to nothing in the middle of the disk: {}", map[row * N + N / 2]);
-    }
-
-    #[test]
-    fn zero_strength_is_identity() {
-        let (sharp, reference) = disk();
-        let out = dering(&sharp, &reference, &DeringParams { strength: 0.0, ..Default::default() }, None, None);
-        assert_eq!(out.channels(), sharp.channels());
-    }
 }

@@ -1,6 +1,6 @@
 use crate::history::History;
 use crate::mosaic_ui::{MosaicEditor, MosaicOutcome};
-use crate::panels::{self, BrushSettings, LayerTemplate, LayerTool, LayerUi, PanelAction, PickTarget, PsfPreview, StageStatus, ToneParts, format_duration};
+use crate::panels::{self, BrushSettings, LayerTemplate, LayerTool, LayerUi, MaskThumbView, PanelAction, PickTarget, PsfPreview, StageStatus, ToneParts, format_duration};
 use crate::prefs::{self as prefs_group, Preferences, SettingsWindow};
 use crate::theme::{self, ACCENT, BORDER, TEXT, TEXT_WEAK};
 use crate::viewer::{BrushView, Compare, CropAction, Overlay, ShapeKind, Tool, Viewer};
@@ -15,13 +15,13 @@ use ps_core::mask::{MaskShape, MaskSpec, Stroke as BrushStroke};
 use ps_core::mosaic::{Mosaic, Placement};
 use ps_core::geometry::{self, Geometry};
 use ps_core::dering::DeringParams;
-use ps_core::pipeline::{Aux, DERING_MASK, LayerRole, Module, Pipeline, Processor, Stage, StageTiming, next_generation};
+use ps_core::pipeline::{Aux, LayerRole, RING_MASK, Module, Pipeline, Processor, Stage, StageTiming, next_generation};
 use ps_core::smart::SmartView;
 use ps_core::preset::{add_role_layer, auto_pipeline_with, explain, initial_pipeline, neutral_pipeline, restructure};
 use ps_core::wavelet::{ScaleMode, WaveletParams};
 use ps_core::equipment::Setup;
 use ps_core::deconv::{DeconvAlgorithm, DeconvParams};
-use crate::instrument::{CaptureState, InstrumentAction, InstrumentView, instrument_body};
+use crate::instrument::{CaptureState, InstrumentAction, InstrumentView, instrument_body, setup_label};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,7 +39,7 @@ const ACTUAL_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, 
 /// Export next to the original, in the last format used.
 const QUICK_EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::E);
 /// Keys 1‥5 pick the panel's areas.
-const AREA_KEYS: [Key; 5] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5];
+const AREA_KEYS: [Key; 6] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
 const TOGGLE_ROI: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::R);
 const SPLIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::S);
 const CROP: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::C);
@@ -190,6 +190,8 @@ pub struct PlanetaryStudio {
     show_mask: bool,
     layer_tool: LayerTool,
     brush: BrushSettings,
+    /// Miniatures of the layer masks, by layer id (kept while a layer is off).
+    mask_thumbs: HashMap<u64, MaskThumbView>,
     /// Width of the side panel's content last frame (watched by a test for runaway growth).
     side_width: f32,
     /// Waiting for a click on the image to set the black or white point.
@@ -208,6 +210,10 @@ pub struct PlanetaryStudio {
     /// resolution map's colours span.
     smart_view: SmartView,
     smart_legend: Option<(f32, f32)>,
+    /// The equipment window (from the top bar).
+    instrument_open: bool,
+    /// A levels slider or curve point was being dragged in the last panel pass.
+    tone_dragging: bool,
     /// Show burnt and crushed pixels, and how many there are.
     show_clipping: bool,
     clipped: Option<usize>,
@@ -262,6 +268,7 @@ impl PlanetaryStudio {
             show_mask: false,
             layer_tool: LayerTool::None,
             brush: BrushSettings::default(),
+            mask_thumbs: HashMap::new(),
             side_width: 0.0,
             picking: None,
             psf_note: None,
@@ -271,6 +278,8 @@ impl PlanetaryStudio {
             show_ringing: false,
             smart_view: SmartView::None,
             smart_legend: None,
+            instrument_open: false,
+            tone_dragging: false,
             show_clipping: false,
             clipped: None,
             snapshot: None,
@@ -488,8 +497,7 @@ impl PlanetaryStudio {
             let start = Instant::now();
             let image = ready.unwrap_or_else(|| {
                 let masks = ps_core::pipeline::masks_for(&pipeline, &source);
-                let globe = pipeline.dering.enabled.then(|| ps_core::dering::find_globe(&source, pipeline.dering.params.region)).flatten();
-                let aux = Aux { masks: &masks, luminance, bxt_executable: bxt.as_deref(), globe, ..Default::default() };
+                let aux = Aux { masks: &masks, luminance, bxt_executable: bxt.as_deref(), ..Default::default() };
                 let out = Processor::default().run(source, next_generation(), &pipeline, &aux, &|| false, &|_, _| {});
                 out.expect("never cancelled").image
             });
@@ -566,6 +574,7 @@ impl PlanetaryStudio {
             InstrumentAction::SetupChanged => {
                 if let Some(doc) = &self.document {
                     self.prefs.setup = doc.setup.clone();
+                    self.remember_setup();
                 }
                 self.equipment_changed();
             }
@@ -580,6 +589,87 @@ impl PlanetaryStudio {
                     self.read_log(&path);
                 }
             }
+        }
+    }
+
+    /// The current equipment first among the recent ones (when anything of it is known).
+    fn remember_setup(&mut self) {
+        let setup = self.prefs.setup.clone();
+        if setup.telescope.is_none() && setup.camera.is_none() {
+            return;
+        }
+        let recent = &mut self.prefs.recent_setups;
+        // Telescope and camera identify a setup; Barlow and filter changes replace it.
+        recent.retain(|s| (s.telescope.as_ref().map(|t| &t.name), s.camera.as_ref().map(|c| &c.name)) != (setup.telescope.as_ref().map(|t| &t.name), setup.camera.as_ref().map(|c| &c.name)));
+        recent.insert(0, setup);
+        recent.truncate(5);
+    }
+
+    /// The equipment selector of the top bar: the current setup, the recent ones, the details.
+    fn instrument_menu(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = &self.document else { return };
+        let label = setup_label(&doc.setup);
+        let button = egui::Button::new((ICON_PHOTO_CAMERA.rich_text().color(ACCENT), RichText::new(label).color(TEXT))).corner_radius(egui::CornerRadius::same(7));
+        let mut picked = None;
+        let mut details = false;
+        let current = doc.setup.clone();
+        let recent = self.prefs.recent_setups.clone();
+        egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+            ui.set_min_width(240.0);
+            ui.label(RichText::new("STRUMENTI RECENTI").small().strong().color(TEXT_WEAK));
+            if recent.is_empty() {
+                ui.label(RichText::new("Nessuno: scegli telescopio e camera nei dettagli").small().color(TEXT_WEAK));
+            }
+            for setup in recent {
+                if ui.add(egui::Button::selectable(setup == current, setup_label(&setup))).clicked() {
+                    picked = Some(setup);
+                }
+            }
+            ui.separator();
+            if ui.button((ICON_TUNE.rich_text(), "Dettagli strumento…")).on_hover_text("Oggetto, telescopio, camera, Barlow, filtro, log di ripresa e diagnosi").clicked() {
+                details = true;
+            }
+        })
+        .0
+        .on_hover_text("Lo strumento dell'immagine: scegline uno recente o apri i dettagli");
+        if let Some(setup) = picked
+            && let Some(doc) = &mut self.document
+        {
+            doc.setup = setup;
+            self.instrument_action(InstrumentAction::SetupChanged);
+        }
+        if details {
+            self.instrument_open = true;
+        }
+    }
+
+    /// The equipment and diagnosis, in a window of its own.
+    fn instrument_window(&mut self, ctx: &egui::Context) {
+        if !self.instrument_open {
+            return;
+        }
+        let mut open = true;
+        let mut actions = Vec::new();
+        if let Some(doc) = &mut self.document {
+            egui::Window::new(RichText::new("Strumento").strong())
+                .open(&mut open)
+                .default_pos(egui::pos2(200.0, 56.0))
+                .default_width(440.0)
+                .default_height(640.0)
+                .resizable(true)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        let view = InstrumentView { setup: &mut doc.setup, capture: &mut doc.capture, analysis: &doc.analysis, wavelet: &self.pipeline.wavelet.params };
+                        instrument_body(ui, view, &mut actions);
+                    });
+                });
+        } else {
+            open = false;
+        }
+        self.instrument_open = open;
+        for action in actions {
+            self.instrument_action(action);
         }
     }
 
@@ -639,7 +729,8 @@ impl PlanetaryStudio {
             Stage::Wavelet => p.wavelet.params = start.wavelet.params,
             Stage::Smart => p.smart.params = start.smart.params,
             Stage::Contrast => p.contrast.params = start.contrast.params,
-            Stage::Dering => p.dering.params = start.dering.params,
+            // The strokes are the user's drawing, not a setting ("Cancella" removes them).
+            Stage::Dering => p.dering.params = DeringParams { strokes: std::mem::take(&mut p.dering.params.strokes), ..start.dering.params },
             Stage::Tone => p.tone.params = start.tone.params,
             Stage::Curves => p.curves.params = start.curves.params,
             Stage::Color => p.color.params = start.color.params,
@@ -692,7 +783,7 @@ impl PlanetaryStudio {
             }
             Stage::Mineral => p.mineral = Module::on(Default::default()),
             // The automatic settings keep the area touched up by hand.
-            Stage::Dering => p.dering = Module::on(DeringParams { strength: 0.8, strokes: p.dering.params.strokes.clone(), ..auto.dering.params }),
+            Stage::Dering => p.dering = Module::on(DeringParams { strength: 1.0, strokes: p.dering.params.strokes.clone(), width: p.dering.params.width, ..auto.dering.params }),
             Stage::Rings | Stage::Moons => {
                 // Start the dedicated layer over with its default settings.
                 let role = if stage == Stage::Rings { LayerRole::Rings } else { LayerRole::Moons };
@@ -701,6 +792,13 @@ impl PlanetaryStudio {
             }
             Stage::Layers => {}
         }
+    }
+
+    /// No automatic amount applied: the fields the automatic switch sets are at the starting point.
+    fn is_untouched(&self) -> bool {
+        let Some(doc) = &self.document else { return true };
+        let (start, p) = (self.starting_point(doc.kind, &doc.analysis), &self.pipeline);
+        (&p.align, &p.deconv, &p.denoise, &p.wavelet, &p.dering, &p.bxt.params) == (&start.align, &start.deconv, &start.denoise, &start.wavelet, &start.dering, &start.bxt.params)
     }
 
     fn is_customised(&self) -> bool {
@@ -791,6 +889,7 @@ impl PlanetaryStudio {
         }
         self.last_output = None;
         self.full_output = None;
+        self.mask_thumbs.clear();
         self.timings.clear();
         if self.preview == PreviewMode::Roi
             && let Some(doc) = &mut self.document
@@ -820,6 +919,8 @@ impl PlanetaryStudio {
                     // else the one used last.
                     let mut analysis = analysis;
                     let mut capture = CaptureState::read(&path);
+                    // No subject named: what the pixels suggest (Saturn, Mars, Jupiter).
+                    capture.body = capture.body.or(analysis.planet);
                     capture.measure(&image, &analysis);
                     let setup = Setup::from_capture(&capture.info, &self.prefs.setup);
                     analysis.optics = setup.optics();
@@ -854,6 +955,7 @@ impl PlanetaryStudio {
                     self.layer_tool = LayerTool::None;
                     self.last_output = None;
                     self.full_output = None;
+                    self.mask_thumbs.clear();
                     self.histogram = None;
                     self.timings.clear();
                     self.warnings.clear();
@@ -887,6 +989,13 @@ impl PlanetaryStudio {
             if out.roi.is_none() && !out.proxy {
                 self.full_output = Some(out.clone());
             }
+            for t in &out.mask_thumbs {
+                if self.mask_thumbs.get(&t.layer).is_none_or(|v| v.generation != t.generation) {
+                    let texture = ctx.load_texture(format!("mask-thumb-{}", t.layer), (*t.image).clone(), egui::TextureOptions::LINEAR);
+                    self.mask_thumbs.insert(t.layer, MaskThumbView { texture, generation: t.generation, empty: t.empty });
+                }
+            }
+            self.mask_thumbs.retain(|id, _| self.pipeline.layers.iter().any(|l| l.id == *id));
             if out.background {
                 continue;
             }
@@ -936,7 +1045,7 @@ impl PlanetaryStudio {
             memory_saving: self.prefs.memory_saving,
             proxy,
             ringing_map: self.show_ringing,
-            clip_warning: self.show_clipping,
+            clip_warning: self.clipping_shown(),
             smart_view: self.smart_view,
         };
         if self.last_request.as_ref() == Some(&key) {
@@ -1078,7 +1187,7 @@ impl PlanetaryStudio {
                 self.layer_tool = LayerTool::None;
             }
         }
-        // 1‥5: the panel's areas, in the order shown.
+        // 1‥6: the panel's areas, in the order shown.
         if let Some(doc) = &self.document {
             let areas: Vec<String> = self.prefs.panel_layout(doc.kind, doc.source.is_mono()).iter().map(|(g, _)| g.name().to_string()).collect();
             for (key, name) in AREA_KEYS.iter().zip(areas) {
@@ -1106,7 +1215,25 @@ impl PlanetaryStudio {
     fn apply_actions(&mut self, ctx: &egui::Context, actions: Vec<PanelAction>) {
         for action in actions {
             match action {
-                PanelAction::SelectKind(kind) => self.apply_kind(kind),
+                PanelAction::SelectSubject(subject) => {
+                    if self.document.as_ref().is_some_and(|d| d.kind != subject.kind) {
+                        self.apply_kind(subject.kind);
+                    }
+                    if let Some(doc) = &mut self.document {
+                        doc.capture.body = subject.body;
+                        doc.capture.measure(&doc.original, &doc.analysis);
+                    }
+                }
+                PanelAction::RemoveAuto => {
+                    if let Some(doc) = &self.document {
+                        let start = self.starting_point(doc.kind, &doc.analysis);
+                        let p = &mut self.pipeline;
+                        let strokes = std::mem::take(&mut p.dering.params.strokes);
+                        (p.align, p.deconv, p.denoise, p.wavelet, p.dering) = (start.align, start.deconv, start.denoise, start.wavelet, start.dering);
+                        p.dering.params.strokes = strokes;
+                        p.bxt.params = start.bxt.params;
+                    }
+                }
                 PanelAction::AutoAll => self.apply_auto_all(),
                 PanelAction::AutoModule(stage) => self.apply_auto_module(stage),
                 PanelAction::ResetModule(stage) => self.reset_module(stage),
@@ -1150,11 +1277,27 @@ impl PlanetaryStudio {
                 }
                 PanelAction::CreateRole(role) => {
                     if !self.pipeline.layers.iter().any(|l| l.role == Some(role)) {
-                        add_role_layer(&mut self.pipeline, role);
+                        let id = add_role_layer(&mut self.pipeline, role);
+                        (self.selected_layer, self.show_mask, self.layer_tool) = (Some(id), true, LayerTool::None);
                     }
                 }
+                PanelAction::RestoreRole(id) => self.restore_role(id),
             }
         }
+    }
+
+    /// Back to the recommended settings of the rings' or moons' mask, keeping its place in the
+    /// list, its name, its switch and the strokes painted on it.
+    fn restore_role(&mut self, id: u64) {
+        let Some(index) = self.pipeline.layers.iter().position(|l| l.id == id) else { return };
+        let Some(role) = self.pipeline.layers[index].role else { return };
+        let fresh_id = add_role_layer(&mut self.pipeline, role);
+        let mut fresh = self.pipeline.layers.pop().expect("just added");
+        debug_assert_eq!(fresh.id, fresh_id);
+        let old = &self.pipeline.layers[index];
+        (fresh.id, fresh.name, fresh.enabled) = (old.id, old.name.clone(), old.enabled);
+        fresh.mask.strokes = old.mask.strokes.clone();
+        self.pipeline.layers[index] = fresh;
     }
 
     fn add_layer(&mut self, template: LayerTemplate) {
@@ -1217,7 +1360,7 @@ impl PlanetaryStudio {
     /// The selected mask must still exist (an undo can remove its layer).
     fn drop_stale_selection(&mut self) {
         if let Some(id) = self.selected_layer
-            && id != DERING_MASK
+            && id != RING_MASK
             && !self.pipeline.layers.iter().any(|l| l.id == id)
         {
             (self.selected_layer, self.layer_tool, self.show_mask) = (None, LayerTool::None, false);
@@ -1388,7 +1531,7 @@ impl PlanetaryStudio {
     fn add_stroke(&mut self, points: Vec<[f32; 2]>, erase: bool) {
         let stroke = BrushStroke { points, radius: self.brush.radius, hardness: self.brush.hardness, erase };
         match self.selected_layer {
-            Some(DERING_MASK) => self.pipeline.dering.params.strokes.push(stroke),
+            Some(RING_MASK) => self.pipeline.dering.params.strokes.push(stroke),
             Some(id) => {
                 if let Some(layer) = self.pipeline.layer_mut(id) {
                     layer.mask.strokes.push(stroke);
@@ -1431,11 +1574,6 @@ impl PlanetaryStudio {
     fn top_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.label(ICON_PLANET.rich_text().size(20.0).color(ACCENT));
-            ui.menu_button(RichText::new("Planetary Studio").strong().color(TEXT), |ui| {
-                if ui.add(egui::Button::new((ICON_SETTINGS.rich_text(), "Impostazioni…")).shortcut_text(ctx.format_shortcut(&SETTINGS))).clicked() {
-                    self.settings.open = true;
-                }
-            });
             ui.add_space(4.0);
             ui.menu_button("File", |ui| {
                 if ui.add(egui::Button::new((ICON_FOLDER_OPEN.rich_text(), "Apri…")).shortcut_text(ctx.format_shortcut(&OPEN))).clicked() {
@@ -1515,7 +1653,7 @@ impl PlanetaryStudio {
                 for (keys, what) in [
                     (open_export.as_str(), "Apri / esporta come…"),
                     (quick_export.as_str(), "Esporta accanto all'originale"),
-                    ("1 … 5", "Aree del pannello"),
+                    ("1 … 6", "Aree del pannello"),
                     (undo_redo.as_str(), "Annulla / ripeti"),
                     (settings.as_str(), "Impostazioni"),
                     ("Spazio (tieni)", "Mostra l'originale"),
@@ -1536,6 +1674,11 @@ impl PlanetaryStudio {
                     });
                 }
             });
+
+            if self.document.is_some() {
+                ui.add(egui::Separator::default().vertical().spacing(14.0));
+                self.instrument_menu(ui);
+            }
 
             // Actions only (the view options float over the image, export has its tab).
             // Right-to-left: added from the far right (settings) towards the menus.
@@ -1570,16 +1713,18 @@ impl PlanetaryStudio {
                     if tool_button(ui, ICON_CROP, "Ritaglia", self.cropping).on_hover_text("Ritaglia e ruota (C)").clicked() && !self.cropping {
                         self.start_crop();
                     }
-                    separator(ui);
-                }
-                if tool_button(ui, ICON_FOLDER_OPEN, "Apri", false).on_hover_text(format!("Apri un'immagine ({})", ctx.format_shortcut(&OPEN))).clicked() {
-                    self.open_dialog(ctx);
                 }
             });
         });
     }
 
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
+    /// Burnt pixels on screen: switched on in the top bar, or while a levels slider or a curve
+    /// point is dragged.
+    fn clipping_shown(&self) -> bool {
+        self.show_clipping || self.tone_dragging
+    }
+
+        fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if let Some(busy) = &self.io_busy {
                 ui.add(egui::Spinner::new().size(12.0).color(ACCENT));
@@ -1618,7 +1763,7 @@ impl PlanetaryStudio {
                     ui.separator();
                     ui.label(RichText::new(format!("elaborazione {}", format_duration(out.elapsed))).small().color(TEXT_WEAK));
                 }
-                if let Some(n) = self.clipped.filter(|_| self.show_clipping) {
+                if let Some(n) = self.clipped.filter(|_| self.clipping_shown()) {
                     ui.separator();
                     let colour = if n > 0 { ui.visuals().warn_fg_color } else { TEXT_WEAK };
                     ui.label(RichText::new(if n == 1 { "1 pixel bruciato".to_string() } else { format!("{n} pixel bruciati") }).small().color(colour));
@@ -1662,7 +1807,7 @@ impl PlanetaryStudio {
             Stage::Curves => p.curves.enabled && !p.curves.params.is_neutral(),
             Stage::Color => p.color.enabled && !p.color.params.is_neutral(),
             Stage::Mineral => p.mineral.enabled && (!p.mineral.params.is_neutral() || self.document.as_ref().is_some_and(|d| d.luminance.is_some())),
-            Stage::Layers => p.layers.iter().any(|l| l.role.is_none() && l.enabled),
+            Stage::Layers => p.layers.iter().any(|l| l.enabled && l.overrides_any()),
             Stage::Rings => role(LayerRole::Rings),
             Stage::Moons => role(LayerRole::Moons),
         }
@@ -1677,9 +1822,9 @@ impl PlanetaryStudio {
 
         let mut actions = Vec::new();
         let customised = self.is_customised();
+        let untouched = self.is_untouched();
         let running = self.worker.progress();
         let scales_before = self.pipeline.wavelet.params.scale_mode;
-        let mut instrument_actions = Vec::new();
         let Some((kind, mono)) = self.document.as_ref().map(|d| (d.kind, d.source.is_mono())) else { return };
         let layout = self.prefs.panel_layout(kind, mono);
         let active: Vec<(prefs_group::Group, usize)> = layout.iter().map(|(g, stages)| (*g, stages.iter().filter(|s| self.stage_active(**s)).count())).collect();
@@ -1693,21 +1838,44 @@ impl PlanetaryStudio {
         let gpu = self.prefs.use_gpu && matches!(ps_core::gpu::status(), Some(Some(_)));
         let last_export = self.last_export.clone();
         let export_stem = self.export_stem();
-        let Self { document, pipeline, prefs, psf_preview, psf_note, timings, warnings, selected_layer, show_mask, layer_tool, brush, side_width, show_ringing, smart_view, smart_legend, .. } = self;
+        let Self { document, pipeline, prefs, psf_preview, psf_note, timings, warnings, selected_layer, show_mask, layer_tool, brush, mask_thumbs, side_width, show_ringing, smart_view, smart_legend, .. } = self;
         let Some(doc) = document else { return };
         let why = explain(doc.kind, &doc.analysis, pipeline.wavelet.params.scale_mode);
         let auto_deconv = ps_core::preset::auto_deconv(doc.kind, &doc.analysis, prefs.auto_strength);
         let auto_smart = ps_core::preset::smart_structure(doc.kind, &doc.analysis);
+        // What the wavelet controls' resets go back to: the image's starting point.
+        let scales = pipeline.wavelet.params.scale_mode;
+        let wavelet_start = if prefs.auto_structure {
+            ps_core::preset::wavelet_structure(doc.kind, &doc.analysis, scales)
+        } else {
+            ps_core::wavelet::WaveletParams { scale_mode: scales, ..Default::default() }
+        };
+        let detail_cutoff = ps_core::preset::detail_cutoff(&doc.analysis);
         let luminance_name = doc.luminance.as_ref().map(|l| l.name.clone());
+        // What the final sharpening works on: the sharpening steps shown before it.
+        let upstream: Vec<(Stage, bool)> = layout
+            .iter()
+            .flat_map(|(_, stages)| stages.iter().copied())
+            .take_while(|s| *s != Stage::Smart)
+            .filter(|s| matches!(s, Stage::Bxt | Stage::Deconv | Stage::Wavelet | Stage::Contrast))
+            .map(|s| (s, active_stages.contains(&s)))
+            .collect();
 
         // Fixed at the top: what the image is, the automatic settings, the areas.
         ui.add_space(theme::space::L);
         ui.set_max_width(ui.available_width());
-        panels::start_row(ui, doc.kind, &doc.analysis, customised, prefs.auto_structure, &mut prefs.auto_strength, &mut actions);
+        let start_view = panels::StartView {
+            subject: panels::Subject { kind: doc.kind, body: doc.capture.body },
+            analysis: &doc.analysis,
+            named: doc.capture.info.body,
+            customised,
+            untouched,
+            auto_structure: prefs.auto_structure,
+        };
+        panels::start_row(ui, start_view, &mut prefs.auto_strength, &mut actions);
         ui.add_space(theme::space::L);
         // The module areas, then the export tab.
         let mut tabs = active.clone();
-        tabs.push((prefs_group::Group::Instrument, 0));
         tabs.push((prefs_group::Group::Export, 0));
         let mut area = tabs.iter().map(|(g, _)| *g).find(|g| g.name() == prefs.current_area).or(tabs.first().map(|(g, _)| *g));
         if let Some(current) = &mut area {
@@ -1720,10 +1888,6 @@ impl PlanetaryStudio {
             // Nothing inside may ask for more than the panel's width, or the panel grows.
             ui.set_max_width(ui.available_width());
             *side_width = ui.available_width();
-            if area == Some(prefs_group::Group::Instrument) {
-                let view = InstrumentView { setup: &mut doc.setup, capture: &mut doc.capture, analysis: &doc.analysis, wavelet: &pipeline.wavelet.params };
-                instrument_body(ui, view, &mut instrument_actions);
-            }
             if area == Some(prefs_group::Group::Export) {
                 let mut name = panels::ExportName { base: &mut doc.export_name, keywords: &mut prefs.export_keywords, suffix: &mut prefs.export_suffix, stem: &export_stem };
                 panels::export_body(ui, &mut prefs.export_format, &mut name, &doc.path, mono, last_export.as_deref(), &mut actions);
@@ -1740,7 +1904,7 @@ impl PlanetaryStudio {
                         let bxt_running = status.running;
                         let mut collapsed = !prefs.expanded.contains(&stage);
                         let is_active = active_stages.contains(&stage);
-                        let layer_ui = |selected, show_mask, tool, brush, folded| LayerUi { selected, show_mask, tool, brush, collapsed: folded, kind: doc.kind, adapt, mono, accordion: one_open };
+                        let layer_ui = |selected, show_mask, tool, brush, folded| LayerUi { selected, show_mask, tool, brush, collapsed: folded, kind: doc.kind, adapt, mono, wavelet_start: &wavelet_start, smart_start: &auto_smart, thumbs: &*mask_thumbs };
                         let buttons = match stage {
                             Stage::Align => panels::module_card(ui, stage, Some(&mut pipeline.align.enabled), is_active, &mut collapsed, status, |ui| {
                                 panels::align_body(ui, &mut pipeline.align.params, mono)
@@ -1757,17 +1921,18 @@ impl PlanetaryStudio {
                                 panels::denoise_body(ui, &mut pipeline.denoise.params, mono, Some(&why.denoise))
                             }),
                             Stage::Wavelet => panels::module_card(ui, stage, Some(&mut pipeline.wavelet.enabled), is_active, &mut collapsed, status, |ui| {
-                                panels::wavelet_body(ui, &mut pipeline.wavelet.params, Some(&why.wavelet))
+                                let view = panels::WaveletView { start: &wavelet_start, why: Some(&why.wavelet), cutoff: detail_cutoff };
+                                panels::wavelet_body(ui, &mut pipeline.wavelet.params, view)
                             }),
                             Stage::Smart => panels::module_card(ui, stage, Some(&mut pipeline.smart.enabled), is_active, &mut collapsed, status, |ui| {
-                                panels::smart_body(ui, &mut pipeline.smart.params, &auto_smart, &mut *smart_view, *smart_legend)
+                                panels::smart_body(ui, &mut pipeline.smart.params, &auto_smart, &mut *smart_view, *smart_legend, &upstream)
                             }),
                             Stage::Contrast => panels::module_card(ui, stage, Some(&mut pipeline.contrast.enabled), is_active, &mut collapsed, status, |ui| {
                                 panels::contrast_body(ui, &mut pipeline.contrast.params)
                             }),
                             Stage::Dering => panels::module_card(ui, stage, Some(&mut pipeline.dering.enabled), is_active, &mut collapsed, status, |ui| {
                                 let state = layer_ui(&mut *selected_layer, &mut *show_mask, &mut *layer_tool, &mut *brush, &mut prefs.collapsed_sections);
-                                panels::dering_body(ui, &mut pipeline.dering.params, &why.dering, doc.kind == ImageKind::Saturn, &mut *show_ringing, state)
+                                panels::dering_body(ui, &mut pipeline.dering.params, &why.dering, &mut *show_ringing, state)
                             }),
                             Stage::Tone => panels::module_card(ui, stage, Some(&mut pipeline.tone.enabled), is_active, &mut collapsed, status, |ui| {
                                 panels::tone_body(ui, &mut pipeline.tone.params, ToneParts::Levels, None, tone_histogram.as_ref(), &mut prefs.histogram_mode, mono, &mut actions)
@@ -1778,29 +1943,14 @@ impl PlanetaryStudio {
                             Stage::Color => panels::module_card(ui, stage, Some(&mut pipeline.color.enabled), is_active, &mut collapsed, status, |ui| {
                                 panels::color_body(ui, &mut pipeline.color.params, mono)
                             }),
-                            Stage::Rings | Stage::Moons => {
-                                let role = if stage == Stage::Rings { LayerRole::Rings } else { LayerRole::Moons };
-                                // The header switch edits a copy (the body borrows the layer), written back below.
-                                let was_on = pipeline.layers.iter().any(|l| l.role == Some(role) && l.enabled);
-                                let mut on = was_on;
-                                let layer = pipeline.layers.iter_mut().find(|l| l.role == Some(role));
-                                let buttons = panels::module_card(ui, stage, Some(&mut on), is_active, &mut collapsed, status, |ui| {
-                                    let state = layer_ui(&mut *selected_layer, &mut *show_mask, &mut *layer_tool, &mut *brush, &mut prefs.collapsed_sections);
-                                    panels::role_body(ui, layer, role, state, &mut actions)
-                                });
-                                if on != was_on {
-                                    match pipeline.layers.iter_mut().find(|l| l.role == Some(role)) {
-                                        Some(l) => l.enabled = on,
-                                        None => actions.push(PanelAction::CreateRole(role)),
-                                    }
-                                }
-                                // "Auto" and "reset" (re)create the layer with its defaults.
-                                buttons
-                            }
-                            Stage::Layers => panels::module_card(ui, stage, None, is_active, &mut collapsed, status, |ui| {
+                            // Listed among the masks now (see `Preferences::upgraded`).
+                            Stage::Rings | Stage::Moons => panels::CardButtons::default(),
+                            // The list of masks, then the selected one's editor: no card to fold.
+                            Stage::Layers => {
                                 let state = layer_ui(&mut *selected_layer, &mut *show_mask, &mut *layer_tool, &mut *brush, &mut prefs.collapsed_sections);
-                                panels::layers_body(ui, &mut pipeline.layers, state, &mut actions)
-                            }),
+                                panels::masks_area(ui, &mut pipeline.layers, state, &mut actions);
+                                panels::CardButtons::default()
+                            }
                             Stage::Mineral => panels::module_card(ui, stage, Some(&mut pipeline.mineral.enabled), is_active, &mut collapsed, status, |ui| {
                                 panels::mineral_body(ui, &mut pipeline.mineral.params, mono, luminance_name.as_deref(), &mut actions)
                             }),
@@ -1824,9 +1974,6 @@ impl PlanetaryStudio {
         });
         if self.pipeline.wavelet.params.scale_mode != scales_before {
             self.switch_scales(scales_before);
-        }
-        for action in instrument_actions {
-            self.instrument_action(action);
         }
         self.apply_actions(ctx, actions);
     }
@@ -1874,6 +2021,7 @@ impl eframe::App for PlanetaryStudio {
             d.insert_temp(egui::Id::unique(panels::MASK_TOOLS_SHOWN), false);
             d.insert_temp(egui::Id::unique(panels::RINGING_SWITCH_SHOWN), false);
             d.insert_temp(egui::Id::unique(panels::SMART_ZONES_SWITCH_SHOWN), false);
+            d.insert_temp(egui::Id::unique(panels::TONE_DRAGGING), false);
         });
         self.settings.show(ctx, &mut self.prefs);
         ps_core::gpu::set_enabled(self.prefs.use_gpu);
@@ -1895,6 +2043,7 @@ impl eframe::App for PlanetaryStudio {
             let max = (ctx.content_rect().width() * 0.45).clamp(360.0, 640.0);
             egui::Panel::right("side").frame(side).resizable(true).default_size(420.0).min_size(340.0).max_size(max).show(ui, |ui| self.side_panel(ctx, ui));
             self.settle_tools(ctx, tool_before);
+            self.tone_dragging = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(panels::TONE_DRAGGING))).unwrap_or(false);
         }
 
         // Hold Space to peek at the original. With the pointer over the image the key is ours
@@ -2003,6 +2152,9 @@ impl eframe::App for PlanetaryStudio {
                 stroke = out.stroke;
                 picked = out.picked;
                 probed = out.probed;
+                if out.roi_toggle {
+                    self.tool = if self.tool == Tool::Roi { Tool::Pan } else { Tool::Roi };
+                }
                 self.canvas_hovered = out.hovered;
             } else {
                 self.empty_state(ctx, ui);
@@ -2028,6 +2180,7 @@ impl eframe::App for PlanetaryStudio {
             self.measure_psf(area);
         }
         self.deconv_compare_window(ctx);
+        self.instrument_window(ctx);
         if let Some(action) = crop_action {
             self.finish_crop(ctx, action);
         }
@@ -2071,7 +2224,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let mut output = ctx.run_ui(Default::default(), |_| {});
-        let missing: String = "°·×βσλ–…″⌘⇧⌥⌃".chars().filter(|&c| !ctx.fonts_mut(|f| f.has_glyph(&egui::FontId::proportional(13.0), c))).collect();
+        let missing: String = "°·×≈βσλ–…″⌘⇧⌥⌃⚠".chars().filter(|&c| !ctx.fonts_mut(|f| f.has_glyph(&egui::FontId::proportional(13.0), c))).collect();
         // No renderer here to upload the font atlas to.
         output.textures_delta.clear();
         assert!(missing.is_empty(), "missing glyphs: {missing}");
@@ -2131,28 +2284,52 @@ mod tests {
         assert_eq!(Pipeline { layers: vec![], ..app.pipeline.clone() }, neutral_pipeline());
     }
 
+    /// Adding the rings' mask selects it; "Valori consigliati" restores its settings in place,
+    /// keeping its name, switch, position and painted strokes.
     #[test]
-    fn layer_sections_open_one_at_a_time() {
+    fn rings_mask_restores_in_place() {
+        let image = Image::new(64, 32, vec![(0..64 * 32).map(|i| (i % 64) as f32 / 64.0).collect()], 16);
+        let mut harness = opened([1200.0, 800.0], image);
+        let ctx = harness.ctx.clone();
+        let app = harness.state_mut();
+        app.add_layer(LayerTemplate::Ellipse);
+        app.apply_actions(&ctx, vec![PanelAction::CreateRole(LayerRole::Rings)]);
+        let id = app.pipeline.layers[1].id;
+        assert_eq!(app.selected_layer, Some(id), "the new mask is selected");
+        app.pipeline.layers.swap(0, 1);
+        let fresh = app.pipeline.layers[0].clone();
+        let rings = &mut app.pipeline.layers[0];
+        (rings.name, rings.enabled) = ("Mie".into(), false);
+        rings.wavelet.enabled = false;
+        rings.mask.strokes.push(BrushStroke { points: vec![[1.0, 1.0]], radius: 3.0, hardness: 0.5, erase: false });
+        app.apply_actions(&ctx, vec![PanelAction::RestoreRole(id)]);
+        let rings = &app.pipeline.layers[0];
+        assert_eq!((rings.id, rings.name.as_str(), rings.enabled, rings.mask.strokes.len()), (id, "Mie", false, 1));
+        assert_eq!(rings.wavelet, fresh.wavelet);
+        assert_eq!(app.pipeline.layers.len(), 2);
+    }
+
+    #[test]
+    fn layer_adjustments_one_at_a_time() {
         // Tall enough for the whole layer editor to be on screen, where the click lands.
         let image = Image::new(64, 32, vec![(0..64 * 32).map(|i| (i % 64) as f32 / 64.0).collect()], 16);
         let mut harness = opened([1400.0, 2400.0], image);
         {
             let app = harness.state_mut();
-            app.prefs.one_group_open = true;
-            app.prefs.current_area = "Livelli".into();
-            app.prefs.expanded.insert(Stage::Layers);
+            app.prefs.current_area = "Maschere".into();
             app.add_layer(LayerTemplate::Ellipse);
             app.selected_layer = app.pipeline.layers.first().map(|l| l.id);
-            app.prefs.collapsed_sections.remove("layer:mask");
-            app.prefs.collapsed_sections.insert("layer:wavelet".into());
         }
         harness.run_steps(2);
+        assert!(harness.state().show_mask, "an open layer shows what it selects");
         use egui_kittest::kittest::Queryable;
-        harness.get_by_label_contains("Wavelet").click();
+        harness.get_by_label("Contrasto").click();
         harness.run_steps(2);
-        let folded = &harness.state().prefs.collapsed_sections;
-        assert!(!folded.contains("layer:wavelet"), "the clicked section opens");
-        assert!(folded.contains("layer:mask"), "the open one closes");
+        assert!(harness.state().prefs.collapsed_sections.contains("layer-open:contrast"), "the clicked adjustment opens");
+        harness.get_by_label("Rumore").click();
+        harness.run_steps(2);
+        let open = &harness.state().prefs.collapsed_sections;
+        assert!(open.contains("layer-open:noise") && !open.contains("layer-open:contrast"), "the open one closes");
     }
 
     /// With the quick preview on, a drag that changes the settings renders a reduced image;
@@ -2208,7 +2385,7 @@ mod tests {
         assert!(expanded.contains(&Stage::Wavelet) && !expanded.contains(&Stage::Deconv), "{expanded:?}");
 
         let app = harness.state_mut();
-        app.selected_layer = Some(DERING_MASK);
+        app.selected_layer = Some(RING_MASK);
         app.add_stroke(vec![[10.0, 10.0]], false);
         assert_eq!(app.pipeline.dering.params.strokes.len(), 1);
     }
@@ -2221,21 +2398,20 @@ mod tests {
         let mut harness = opened([1400.0, 2000.0], image);
         {
             let app = harness.state_mut();
-            app.prefs.current_area = "Livelli".into();
-            app.prefs.expanded.insert(Stage::Layers);
+            app.prefs.current_area = "Maschere".into();
             app.add_layer(LayerTemplate::Brush);
         }
         harness.run_steps(3);
         assert_eq!(harness.state().layer_tool, LayerTool::Brush, "painting right after adding a brush layer");
 
-        // Closing the card puts the brush away.
-        harness.state_mut().prefs.expanded.remove(&Stage::Layers);
+        // Leaving the masks' area puts the brush away.
+        harness.state_mut().prefs.current_area = "Nitidezza".into();
         harness.run_steps(2);
         let app = harness.state();
         assert!(app.layer_tool == LayerTool::None && !app.show_mask);
 
         // The layer disappearing (as an undo of its creation does) forgets it as the selected mask.
-        harness.state_mut().prefs.expanded.insert(Stage::Layers);
+        harness.state_mut().prefs.current_area = "Maschere".into();
         harness.state_mut().layer_tool = LayerTool::Brush;
         harness.run_steps(2);
         harness.state_mut().pipeline.layers.clear();
@@ -2251,8 +2427,7 @@ mod tests {
         let mut harness = opened([1400.0, 900.0], image);
         {
             let app = harness.state_mut();
-            app.prefs.current_area = "Livelli".into();
-            app.prefs.expanded.insert(Stage::Layers);
+            app.prefs.current_area = "Maschere".into();
             app.add_layer(LayerTemplate::Brush);
         }
         harness.run_steps(3);
@@ -2323,12 +2498,12 @@ mod tests {
         assert_eq!(harness.state().pipeline, b, "B stays");
     }
 
-    /// Keys 1‥5 pick an area; a double click on a card's title switches the module off.
+    /// Keys 1‥6 pick an area; a double click on a card's title switches the module off.
     #[test]
     fn keys_and_double_click() {
         let image = Image::new(64, 32, vec![(0..64 * 32).map(|i| (i % 64) as f32 / 64.0).collect()], 16);
         let mut harness = opened([1400.0, 900.0], image);
-        harness.key_press(Key::Num3);
+        harness.key_press(Key::Num4);
         harness.run_steps(2);
         assert_eq!(harness.state().prefs.current_area, "Curve e livelli");
         harness.key_press(Key::Num1);
@@ -2464,12 +2639,18 @@ mod tests {
         settle(&mut harness);
         harness.render().unwrap().save(out_dir.join("ui_auto.png")).unwrap();
 
-        // "Nitidezza" with only the dering card open: indented cards, reset buttons.
+        // "Correzione artefatti" with the dering card open: indented cards, reset buttons.
         {
             let app = harness.state_mut();
-            app.prefs.current_area = "Nitidezza".into();
+            app.prefs.current_area = "Correzione artefatti".into();
             app.prefs.expanded = [Stage::Dering].into();
-            app.pipeline.dering.params.strength = 0.6;
+            // A stroke along the right limb, the brush in hand and the ring shown.
+            let doc = app.document.as_ref().unwrap();
+            let (w, h) = (doc.source.width() as f32, doc.source.height() as f32);
+            let (cx, cy, r) = doc.analysis.disk.as_ref().map_or((w / 2.0, h / 2.0, 0.3 * w.min(h)), |d| (d.cx, d.cy, d.radius + 8.0));
+            let points = (0..=20).map(|k| -0.9 + 0.09 * k as f32).map(|a| [cx + r * a.cos(), cy + r * a.sin()]).collect();
+            app.pipeline.dering.params.strokes = vec![BrushStroke { points, radius: 6.0, hardness: 0.5, erase: false }];
+            (app.selected_layer, app.layer_tool, app.brush.radius, app.show_ringing) = (Some(RING_MASK), LayerTool::Brush, 6.0, true);
         }
         settle(&mut harness);
         harness.render().unwrap().save(out_dir.join("ui_dering.png")).unwrap();
@@ -2514,7 +2695,7 @@ mod tests {
         // The equipment tab: a C8 with a 2.5× Barlow and a 2.9 µm camera.
         {
             let app = harness.state_mut();
-            app.prefs.current_area = "Strumento".into();
+            app.instrument_open = true;
             if let Some(doc) = &mut app.document {
                 doc.setup.telescope = ps_core::equipment::telescopes().into_iter().find(|t| t.name.starts_with("Celestron C8"));
                 doc.setup.camera = ps_core::equipment::cameras().into_iter().find(|c| c.name == "ZWO ASI462MC");
@@ -2525,6 +2706,7 @@ mod tests {
         }
         settle(&mut harness);
         harness.render().unwrap().save(out_dir.join("ui_instrument.png")).unwrap();
+        harness.state_mut().instrument_open = false;
         // "Nitidezza intelligente": main sliders, curve, and the map of where it holds back.
         {
             let app = harness.state_mut();
@@ -2563,13 +2745,54 @@ mod tests {
         harness.state_mut().prefs.expanded = [Stage::Wavelet].into();
         settle(&mut harness);
         harness.render().unwrap().save(out_dir.join("ui_wavelet.png")).unwrap();
+        // Scrolled down inside the card: its title stays pinned at the top of the panel.
+        harness.event(egui::Event::PointerMoved(egui::pos2(1300.0, 600.0)));
+        for _ in 0..6 {
+            harness.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, -120.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel });
+            harness.run_steps(1);
+        }
+        settle(&mut harness);
+        harness.render().unwrap().save(out_dir.join("ui_wavelet_sticky.png")).unwrap();
+        harness.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, 2000.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel });
+        harness.run_steps(2);
         egui_kittest::kittest::Queryable::get_by_label(&harness, "Classiche 1·2·4·8").click();
         settle(&mut harness);
         assert_eq!(harness.state().pipeline.wavelet.params.scale_mode, ScaleMode::Dyadic);
         assert_eq!(harness.state().prefs.wavelet_scales, ScaleMode::Dyadic);
         harness.render().unwrap().save(out_dir.join("ui_wavelet_classic.png")).unwrap();
+
         egui_kittest::kittest::Queryable::get_by_label(&harness, "Libere").click();
         settle(&mut harness);
+
+        // The moons' layer: what it selects on top and on the image, then one adjustment.
+        {
+            let app = harness.state_mut();
+            app.prefs.current_area = "Maschere".into();
+            if !app.pipeline.layers.iter().any(|l| l.role == Some(LayerRole::Moons)) {
+                add_role_layer(&mut app.pipeline, LayerRole::Moons);
+            }
+            // A drawn mask that changes nothing yet, switched off, to show its warning dimmed.
+            app.add_layer(LayerTemplate::Ellipse);
+            if let Some(l) = app.pipeline.layers.last_mut() {
+                l.enabled = false;
+            }
+            app.selected_layer = app.pipeline.layers.iter().find(|l| l.role == Some(LayerRole::Moons)).map(|l| l.id);
+            app.layer_tool = LayerTool::None;
+            app.prefs.collapsed_sections.insert("layer-open:wavelet".into());
+        }
+        settle(&mut harness);
+        harness.render().unwrap().save(out_dir.join("ui_layer.png")).unwrap();
+
+        // The ROI being edited, with the button that goes back to moving the view.
+        {
+            let app = harness.state_mut();
+            app.prefs.expanded.clear();
+            app.set_preview(PreviewMode::Roi);
+            app.tool = Tool::Roi;
+        }
+        settle(&mut harness);
+        harness.render().unwrap().save(out_dir.join("ui_roi.png")).unwrap();
+        harness.state_mut().set_preview(PreviewMode::Full);
 
         // Zoomed split view with the deconvolution card folded.
         {
@@ -2631,18 +2854,18 @@ mod tests {
             harness.state_mut().load(&ctx, PathBuf::from(saturn));
             for _ in 0..200 {
                 harness.step();
-                if harness.state().document.as_ref().is_some_and(|d| d.kind == ImageKind::Saturn) {
+                // The fresh image drops the masks made on the previous one (same file or not).
+                let app = harness.state();
+                if app.document.as_ref().is_some_and(|d| d.kind == ImageKind::Saturn) && app.pipeline.layers.is_empty() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
             {
                 let app = harness.state_mut();
-                open_only(app, "Livelli");
-                app.prefs.expanded.remove(&Stage::Moons);
-                app.prefs.expanded.insert(Stage::Rings);
+                open_only(app, "Maschere");
                 app.apply_actions(&ctx, vec![PanelAction::CreateRole(LayerRole::Rings)]);
-                app.selected_layer = app.pipeline.layers.first().map(|l| l.id);
+                app.selected_layer = app.pipeline.layers.iter().find(|l| l.role == Some(LayerRole::Rings)).map(|l| l.id);
                 app.show_mask = true;
             }
             settle(&mut harness);
@@ -2654,7 +2877,7 @@ mod tests {
                 open_only(app, "Nitidezza");
                 app.prefs.expanded = [Stage::Dering].into();
                 app.pipeline.dering.params.strength = 0.8;
-                app.selected_layer = Some(DERING_MASK);
+                app.selected_layer = Some(RING_MASK);
                 app.show_mask = true;
             }
             settle(&mut harness);

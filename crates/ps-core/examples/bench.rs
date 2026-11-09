@@ -130,14 +130,17 @@ fn main() {
 
     // Deringing on its own, without the pipeline's caches around.
     drop(out);
-    let reference = Image::new(w, h, vec![plane.clone(), plane.clone(), plane.clone()], 16);
-    let sharp = reference.clone();
-    let d = ps_core::dering::DeringParams::for_blur(1.6);
-    let _ = ps_core::dering::dering(&sharp, &reference, &d, None, None);
+    let sharp = Image::new(w, h, vec![plane.clone(), plane.clone(), plane.clone()], 16);
+    // A stroke all round the subject, 6 px wide, as when painting a whole limb.
+    let (cx, cy, r) = (w as f32 / 2.0, h as f32 / 2.0, w.min(h) as f32 * 0.4);
+    let points = (0..=120).map(|k| k as f32 * std::f32::consts::TAU / 120.0).map(|a| [cx + r * a.cos(), cy + r * a.sin()]).collect();
+    let d = ps_core::dering::DeringParams { strokes: vec![ps_core::mask::Stroke { points, radius: 6.0, hardness: 0.5, erase: false }], ..Default::default() };
+    let area = ps_core::dering::painted(&d.strokes, w, h);
+    let _ = ps_core::dering::dering(&sharp, &d, &area, None);
     let t = Instant::now();
-    let _ = ps_core::dering::dering(&sharp, &reference, &d, None, None);
+    let _ = ps_core::dering::dering(&sharp, &d, &area, None);
     println!(
-        "dering alone (RGB):           {:>7.1} ms",
+        "dering, whole limb (RGB):     {:>7.1} ms",
         t.elapsed().as_secs_f64() * 1e3
     );
 
