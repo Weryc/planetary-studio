@@ -1,6 +1,8 @@
 //! The mosaic window: the frames to join, how they line up (found automatically, nudged by
 //! dragging), a preview; then the mosaic becomes the image being processed.
 
+use ps_core::i18n::tl;
+use ps_core::tr;
 use crate::theme::{self, ACCENT, BORDER, TEXT, TEXT_WEAK};
 use crate::widgets::{ParamSlider, toggle};
 use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, Vec2};
@@ -89,7 +91,7 @@ impl MosaicEditor {
 
     fn load(&mut self, ctx: &egui::Context, align: bool) {
         let paths: Vec<PathBuf> = self.mosaic.tiles.iter().map(|t| t.path.clone()).collect();
-        self.busy = Some(format!("Caricamento di {} immagini…", paths.len()));
+        self.busy = Some(tr!("Caricamento di {} immagini…", "Loading {} images…", paths.len()));
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
             let images: Vec<Result<Arc<Image>, String>> =
@@ -104,17 +106,17 @@ impl MosaicEditor {
     }
 
     fn realign(&mut self, ctx: &egui::Context) {
-        self.busy = Some("Allineamento…".into());
+        self.busy = Some(tl("Allineamento…").into());
         let (tx, ctx, images) = (self.tx.clone(), ctx.clone(), self.images.clone());
         std::thread::spawn(move || Self::align_in_background(&tx, &ctx, &images));
     }
 
     fn align_in_background(tx: &Sender<Job>, ctx: &egui::Context, images: &[Option<Arc<Image>>]) {
-        tx.send(Job::Progress("Allineamento…".into())).ok();
+        tx.send(Job::Progress(tl("Allineamento…").into())).ok();
         let planes: Vec<Option<Plane>> = images.iter().map(|i| i.as_deref().map(Plane::luminance)).collect();
         let refs: Vec<Option<&Plane>> = planes.iter().map(Option::as_ref).collect();
         let report = |done: usize, total: usize| {
-            tx.send(Job::Progress(format!("Allineamento: coppia {done} di {total}…"))).ok();
+            tx.send(Job::Progress(tr!("Allineamento: coppia {done} di {total}…", "Aligning: pair {done} of {total}…"))).ok();
             ctx.request_repaint();
         };
         let matches = mosaic::match_all(&refs, &report);
@@ -197,7 +199,7 @@ impl MosaicEditor {
         }
         let mut outcome = None;
         let mut open = self.open;
-        egui::Window::new(RichText::new("Mosaico").strong())
+        egui::Window::new(RichText::new(tl("Mosaico")).strong())
             .open(&mut open)
             .default_size([1000.0, 640.0])
             .min_size([700.0, 420.0])
@@ -216,8 +218,8 @@ impl MosaicEditor {
 
     fn side(&mut self, ui: &mut egui::Ui) -> Option<MosaicOutcome> {
         let mut outcome = None;
-        ui.label(RichText::new("IMMAGINI").size(theme::size::SMALL).strong().color(TEXT_WEAK));
-        crate::panels::hint(ui, "Fotogrammi dello stesso soggetto con la stessa focale, che si sovrappongono un po'. Trascina un riquadro nell'anteprima per ritoccarne la posizione.");
+        ui.label(RichText::new(tl("IMMAGINI")).size(theme::size::SMALL).strong().color(TEXT_WEAK));
+        crate::panels::hint(ui, tl("Fotogrammi dello stesso soggetto con la stessa focale, che si sovrappongono un po'. Trascina un riquadro nell'anteprima per ritoccarne la posizione."));
         let mut changed = false;
         egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
             for (i, tile) in self.mosaic.tiles.iter_mut().enumerate() {
@@ -234,13 +236,13 @@ impl MosaicEditor {
                     }
                 });
                 let (status, colour) = match (loaded, tile.enabled, tile.placement) {
-                    (false, ..) if self.busy.is_some() => ("in caricamento", TEXT_WEAK),
-                    (false, ..) => ("non si apre", theme::DANGER),
-                    (_, false, _) => ("esclusa", TEXT_WEAK),
-                    (_, true, None) if self.busy.is_some() => ("in allineamento", TEXT_WEAK),
-                    (_, true, None) => ("non si sovrappone alle altre", theme::WARNING),
-                    (_, true, Some(p)) if p == Placement::IDENTITY => ("riferimento", theme::SUCCESS),
-                    (_, true, Some(_)) => ("allineata", theme::SUCCESS),
+                    (false, ..) if self.busy.is_some() => (tl("in caricamento"), TEXT_WEAK),
+                    (false, ..) => (tl("non si apre"), theme::DANGER),
+                    (_, false, _) => (tl("esclusa"), TEXT_WEAK),
+                    (_, true, None) if self.busy.is_some() => (tl("in allineamento"), TEXT_WEAK),
+                    (_, true, None) => (tl("non si sovrappone alle altre"), theme::WARNING),
+                    (_, true, Some(p)) if p == Placement::IDENTITY => (tl("riferimento"), theme::SUCCESS),
+                    (_, true, Some(_)) => (tl("allineata"), theme::SUCCESS),
                 };
                 ui.label(RichText::new(format!("      {status}")).size(theme::size::SMALL).color(colour));
             }
@@ -253,8 +255,8 @@ impl MosaicEditor {
         }
         ui.add_space(theme::space::S);
         ui.horizontal(|ui| {
-            if ui.button((ICON_ADD.rich_text(), "Aggiungi…")).clicked()
-                && let Some(more) = rfd::FileDialog::new().set_title("Aggiungi immagini al mosaico").add_filter("Immagini", ps_io::READ_EXTENSIONS).pick_files()
+            if ui.button((ICON_ADD.rich_text(), tl("Aggiungi…"))).clicked()
+                && let Some(more) = rfd::FileDialog::new().set_title(tl("Aggiungi immagini al mosaico")).add_filter(tl("Immagini"), ps_io::READ_EXTENSIONS).pick_files()
             {
                 let mut paths: Vec<PathBuf> = self.mosaic.tiles.iter().map(|t| t.path.clone()).collect();
                 let new: Vec<PathBuf> = more.into_iter().filter(|p| !paths.contains(p)).collect();
@@ -264,23 +266,23 @@ impl MosaicEditor {
                 self.start(ui.ctx(), paths);
                 (self.editing_open, self.mosaic.params) = (editing_open, params);
             }
-            if ui.add_enabled(self.busy.is_none() && !self.images.is_empty(), egui::Button::new((ICON_AUTO_FIX_HIGH.rich_text(), "Riallinea"))).on_hover_text("Ritrova automaticamente le posizioni (i ritocchi a mano si perdono)").clicked() {
+            if ui.add_enabled(self.busy.is_none() && !self.images.is_empty(), egui::Button::new((ICON_AUTO_FIX_HIGH.rich_text(), tl("Riallinea")))).on_hover_text(tl("Ritrova automaticamente le posizioni (i ritocchi a mano si perdono)")).clicked() {
                 self.realign(ui.ctx());
             }
         });
 
         ui.add_space(theme::space::M);
-        ui.label(RichText::new("UNIONE").size(theme::size::SMALL).strong().color(TEXT_WEAK));
+        ui.label(RichText::new(tl("UNIONE")).size(theme::size::SMALL).strong().color(TEXT_WEAK));
         let p = &mut self.mosaic.params;
         let before = p.clone();
-        ParamSlider::new("Sfumatura bordi", &mut p.feather, 0.0..=400.0, 80.0).decimals(0).suffix(" px").help("Su quanti pixel un'immagine sfuma nell'altra: più ampia nasconde meglio le giunture").show(ui);
+        ParamSlider::new(tl("Sfumatura bordi"), &mut p.feather, 0.0..=400.0, 80.0).decimals(0).suffix(" px").help(tl("Su quanti pixel un'immagine sfuma nell'altra: più ampia nasconde meglio le giunture")).show(ui);
         ui.horizontal(|ui| {
             toggle(ui, &mut p.match_brightness);
-            ui.label("Uniforma la luminosità").on_hover_text("Trasparenza ed esposizione cambiano da un'immagine all'altra: le porta allo stesso livello dove si sovrappongono");
+            ui.label(tl("Uniforma la luminosità")).on_hover_text(tl("Trasparenza ed esposizione cambiano da un'immagine all'altra: le porta allo stesso livello dove si sovrappongono"));
         });
         ui.horizontal(|ui| {
             toggle(ui, &mut p.prefer_sharp);
-            ui.label("Preferisci la più nitida").on_hover_text("Dove le immagini si sovrappongono conta di più quella con più dettaglio");
+            ui.label(tl("Preferisci la più nitida")).on_hover_text(tl("Dove le immagini si sovrappongono conta di più quella con più dettaglio"));
         });
         if *p != before {
             self.dirty = true;
@@ -295,14 +297,14 @@ impl MosaicEditor {
         }
         let ready = self.busy.is_none() && self.mosaic.tiles.iter().zip(&self.images).filter(|(t, i)| t.enabled && i.is_some() && t.placement.is_some()).count() >= 1;
         let black = Color32::BLACK;
-        let label = if self.editing_open { "Aggiorna il mosaico" } else { "Crea il mosaico" };
+        let label = if self.editing_open { tl("Aggiorna il mosaico") } else { tl("Crea il mosaico") };
         let create = egui::Button::new((ICON_CHECK.rich_text().color(black), RichText::new(label).color(black).strong())).fill(ACCENT).min_size(Vec2::new(ui.available_width(), 32.0));
-        if ui.add_enabled(ready, create).on_hover_text("Unisce le immagini a piena risoluzione e le apre per l'elaborazione; il mosaico resta modificabile (File › Modifica mosaico)").clicked() {
+        if ui.add_enabled(ready, create).on_hover_text(tl("Unisce le immagini a piena risoluzione e le apre per l'elaborazione; il mosaico resta modificabile (File › Modifica mosaico)")).clicked() {
             outcome = Some(MosaicOutcome::Create { mosaic: self.mosaic.clone(), images: self.images.clone(), keep_settings: self.editing_open });
             self.open = false;
         }
         ui.add_space(theme::space::S);
-        if ui.add_enabled(ready, egui::Button::new((ICON_SAVE.rich_text(), "Salva mosaico…")).min_size(Vec2::new(ui.available_width(), 26.0))).on_hover_text("Salva l'elenco delle immagini e le loro posizioni, per riaprire il mosaico in seguito").clicked() {
+        if ui.add_enabled(ready, egui::Button::new((ICON_SAVE.rich_text(), tl("Salva mosaico…"))).min_size(Vec2::new(ui.available_width(), 26.0))).on_hover_text(tl("Salva l'elenco delle immagini e le loro posizioni, per riaprire il mosaico in seguito")).clicked() {
             save(&self.mosaic);
         }
         outcome
@@ -313,7 +315,7 @@ impl MosaicEditor {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 8.0, theme::BG);
         let Some((texture, scale, [ox, oy])) = &self.preview else {
-            let text = if self.busy.is_some() { "Preparazione dell'anteprima…" } else { "Nessuna immagine allineata" };
+            let text = if self.busy.is_some() { tl("Preparazione dell'anteprima…") } else { tl("Nessuna immagine allineata") };
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(14.0), TEXT_WEAK);
             return;
         };
@@ -379,9 +381,9 @@ impl MosaicEditor {
 
 /// Ask where and save the mosaic's description (`.psmosaic`, JSON).
 fn save(mosaic: &Mosaic) {
-    let stem = mosaic.tiles.first().and_then(|t| t.path.file_stem()).and_then(|s| s.to_str()).unwrap_or("mosaico");
+    let stem = mosaic.tiles.first().and_then(|t| t.path.file_stem()).and_then(|s| s.to_str()).unwrap_or(tl("mosaico"));
     let dir = mosaic.tiles.first().and_then(|t| t.path.parent().map(PathBuf::from));
-    let mut dialog = rfd::FileDialog::new().set_title("Salva mosaico").set_file_name(format!("{stem}_mosaico.psmosaic")).add_filter("Mosaico Planetary Studio", &["psmosaic"]);
+    let mut dialog = rfd::FileDialog::new().set_title(tl("Salva mosaico")).set_file_name(tr!("{stem}_mosaico.psmosaic", "{stem}_mosaic.psmosaic")).add_filter(tl("Mosaico Planetary Studio"), &["psmosaic"]);
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
@@ -395,5 +397,5 @@ fn save(mosaic: &Mosaic) {
 /// A saved mosaic (`.psmosaic`).
 pub fn read(path: &std::path::Path) -> Result<Mosaic, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| format!("file di mosaico non valido: {e}"))
+    serde_json::from_str(&text).map_err(|e| tr!("file di mosaico non valido: {e}", "invalid mosaic file: {e}"))
 }

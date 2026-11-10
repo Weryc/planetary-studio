@@ -29,6 +29,56 @@ impl Geometry {
     }
 }
 
+type Mat = [[i32; 2]; 2];
+
+fn mul(a: Mat, b: Mat) -> Mat {
+    let mut r = [[0; 2]; 2];
+    for (i, row) in r.iter_mut().enumerate() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = a[i][0] * b[0][j] + a[i][1] * b[1][j];
+        }
+    }
+    r
+}
+
+/// Clockwise quarter turn on image coordinates (x right, y down).
+const TURN: Mat = [[0, -1], [1, 0]];
+
+/// The linear part of quarter turns then flips (what [`apply`] does before the fine rotation).
+fn lossless_matrix(quarter_turns: u8, flip_h: bool, flip_v: bool) -> Mat {
+    let mut m = [[1, 0], [0, 1]];
+    for _ in 0..quarter_turns % 4 {
+        m = mul(TURN, m);
+    }
+    mul([[if flip_h { -1 } else { 1 }, 0], [0, if flip_v { -1 } else { 1 }]], m)
+}
+
+impl Geometry {
+    /// This orientation followed by an optional left-right mirror of the result and a clockwise
+    /// rotation of `degrees`: the whole quarter-turn part goes into the lossless fields, only the
+    /// remainder (at most 45°) into the fine angle, so a large turn doesn't cut the corners.
+    pub fn then(&self, mirror: bool, degrees: f32) -> Geometry {
+        let quarters = (degrees / 90.0).round();
+        let fine = degrees - 90.0 * quarters;
+        let mut d: Mat = [[1, 0], [0, 1]];
+        if mirror {
+            d = [[-1, 0], [0, 1]];
+        }
+        for _ in 0..(quarters as i32).rem_euclid(4) {
+            d = mul(TURN, d);
+        }
+        let target = mul(d, lossless_matrix(self.quarter_turns, self.flip_horizontal, self.flip_vertical));
+        let (q, h, v) = (0..4u8)
+            .flat_map(|q| [false, true].into_iter().flat_map(move |h| [false, true].into_iter().map(move |v| (q, h, v))))
+            .find(|&(q, h, v)| lossless_matrix(q, h, v) == target)
+            .expect("the dihedral group is closed");
+        // A mirror reverses the sense of the rotation applied before it.
+        let before = if mirror { -self.angle } else { self.angle };
+        let angle = (fine + before + 180.0).rem_euclid(360.0) - 180.0;
+        Geometry { quarter_turns: q, flip_horizontal: h, flip_vertical: v, angle }
+    }
+}
+
 pub fn apply(img: &Image, g: &Geometry) -> Image {
     let mut out = img.clone();
     for _ in 0..g.quarter_turns % 4 {
@@ -120,6 +170,30 @@ mod tests {
     /// 3×2 image numbered 0‥5 row by row.
     fn numbered() -> Image {
         Image::new(3, 2, vec![(0..6).map(|v| v as f32).collect()], 16)
+    }
+
+    /// `then` equals doing the mirror and the rotation on the already-oriented image.
+    #[test]
+    fn then_matches_doing_it_afterwards() {
+        let img = Image::new(5, 4, vec![(0..20).map(|v| v as f32).collect()], 16);
+        for g in [Geometry::default(), Geometry { quarter_turns: 1, flip_horizontal: true, flip_vertical: false, angle: 0.0 }, Geometry { quarter_turns: 3, flip_horizontal: false, flip_vertical: true, angle: 0.0 }] {
+            for mirror in [false, true] {
+                for deg in [0.0f32, 90.0, 180.0, -90.0, 270.0] {
+                    let direct = apply(&img, &g.then(mirror, deg));
+                    let mut step = apply(&img, &g);
+                    if mirror {
+                        step = flip(&step, true, false);
+                    }
+                    for _ in 0..((deg / 90.0).round() as i32).rem_euclid(4) {
+                        step = rotate90(&step);
+                    }
+                    assert_eq!(direct.channels()[0], step.channels()[0], "{g:?} mirror {mirror} {deg}");
+                }
+            }
+        }
+        // The fine part stays in the angle and survives a mirror with its sign reversed.
+        let t = Geometry { angle: 10.0, ..Default::default() }.then(true, 30.0);
+        assert!((t.angle - 20.0).abs() < 1e-4 && t.flip_horizontal, "{t:?}");
     }
 
     #[test]

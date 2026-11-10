@@ -395,3 +395,9 @@ Planetary Studio is built on these open-source Rust crates. Each one keeps its o
 | zvariant | 5.15.1 | MIT |
 | zvariant_derive | 5.15.1 | MIT |
 | zvariant_utils | 4.2.0 | MIT |
+
+## Algorithms ported from other projects
+
+| Source | Used for | License |
+|---|---|---|
+| Sonia Keys, [meeus](https://github.com/soniakeys/meeus) (`saturnmoons`, `jupitermoons`), after J. Meeus, *Astronomical Algorithms* ch. 44 and 46 | Positions of the moons of Jupiter and Saturn (`ps-core/src/moons.rs`) | MIT |

@@ -1,5 +1,6 @@
 //! Parametric point-spread functions, sampled into normalised 2-D kernels.
 
+use crate::i18n::tl;
 use serde::{Deserialize, Serialize};
 
 const MAX_RADIUS: usize = 64;
@@ -212,7 +213,7 @@ pub struct Measurement {
 pub fn measure_in(plane: &[f32], w: usize, h: usize, x0: usize, y0: usize, x1: usize, y1: usize) -> Result<Measurement, &'static str> {
     let (x1, y1) = (x1.min(w), y1.min(h));
     if x1 <= x0 + 2 || y1 <= y0 + 2 {
-        return Err("Il riquadro è troppo piccolo.");
+        return Err(tl("Il riquadro è troppo piccolo."));
     }
     let image_peak = plane.iter().copied().fold(f32::MIN, f32::max).max(1e-6);
     let mut maxima: Vec<(f32, usize, usize)> = Vec::new();
@@ -249,9 +250,9 @@ pub fn measure_in(plane: &[f32], w: usize, h: usize, x0: usize, y0: usize, x1: u
         }
     }
     Err(if extended {
-        "Nel riquadro non c'è un oggetto piccolo e isolato: solo bordi o zone estese. Prova attorno a una stella o a una piccola luna, con un po' di cielo intorno."
+        tl("Nel riquadro non c'è un oggetto piccolo e isolato: solo bordi o zone estese. Prova attorno a una stella o a una piccola luna, con un po' di cielo intorno.")
     } else {
-        "Nel riquadro non c'è niente di più luminoso del fondo."
+        tl("Nel riquadro non c'è niente di più luminoso del fondo.")
     })
 }
 

@@ -1,5 +1,6 @@
 //! Layer masks: which part of the image a layer's own settings apply to (0‥1 per pixel).
 
+use crate::i18n::tl;
 use crate::Image;
 use crate::analysis::{downsample, otsu};
 use crate::color::{ColorMode, working_planes};
@@ -26,11 +27,11 @@ pub enum AutoRegion {
 impl AutoRegion {
     pub fn label(self) -> &'static str {
         match self {
-            AutoRegion::Subject => "Soggetto",
-            AutoRegion::Background => "Sfondo",
-            AutoRegion::SaturnGlobe => "Globo di Saturno",
-            AutoRegion::SaturnRings => "Anelli di Saturno",
-            AutoRegion::Moons => "Lune",
+            AutoRegion::Subject => tl("Soggetto"),
+            AutoRegion::Background => tl("Sfondo"),
+            AutoRegion::SaturnGlobe => tl("Globo di Saturno"),
+            AutoRegion::SaturnRings => tl("Anelli di Saturno"),
+            AutoRegion::Moons => tl("Lune"),
         }
     }
 }
@@ -60,9 +61,9 @@ impl MaskShape {
     pub fn label(&self) -> &'static str {
         match self {
             MaskShape::Auto(r) => r.label(),
-            MaskShape::Ellipse { .. } => "Ellisse",
-            MaskShape::Rectangle { .. } => "Rettangolo",
-            MaskShape::Empty => "Pennello",
+            MaskShape::Ellipse { .. } => tl("Ellisse"),
+            MaskShape::Rectangle { .. } => tl("Rettangolo"),
+            MaskShape::Empty => tl("Pennello"),
         }
     }
 

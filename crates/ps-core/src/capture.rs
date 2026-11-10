@@ -11,6 +11,7 @@
 //! the known ones are looked up by several spellings, so small differences between versions
 //! don't matter.
 
+use crate::i18n::tl;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -31,15 +32,15 @@ impl Body {
 
     pub fn label(self) -> &'static str {
         match self {
-            Body::Moon => "Luna",
-            Body::Sun => "Sole",
-            Body::Mercury => "Mercurio",
-            Body::Venus => "Venere",
-            Body::Mars => "Marte",
-            Body::Jupiter => "Giove",
-            Body::Saturn => "Saturno",
-            Body::Uranus => "Urano",
-            Body::Neptune => "Nettuno",
+            Body::Moon => tl("Luna"),
+            Body::Sun => tl("Sole"),
+            Body::Mercury => tl("Mercurio"),
+            Body::Venus => tl("Venere"),
+            Body::Mars => tl("Marte"),
+            Body::Jupiter => tl("Giove"),
+            Body::Saturn => tl("Saturno"),
+            Body::Uranus => tl("Urano"),
+            Body::Neptune => tl("Nettuno"),
         }
     }
 
@@ -84,6 +85,28 @@ impl Moment {
         let b = 2 - a + a.div_euclid(4);
         let day = self.day as f64 + (self.hour as f64 + self.minute as f64 / 60.0 + self.second as f64 / 3600.0) / 24.0;
         (365.25 * (y + 4716) as f64).floor() + (30.6001 * (m + 1) as f64).floor() + day + b as f64 - 1524.5
+    }
+
+    /// The moment of a Julian date (Meeus, chapter 7).
+    pub fn from_julian(jd: f64) -> Moment {
+        let jd = jd + 0.5;
+        let z = jd.floor();
+        let f = jd - z;
+        let a = if z < 2_299_161.0 {
+            z
+        } else {
+            let alpha = ((z - 1_867_216.25) / 36_524.25).floor();
+            z + 1.0 + alpha - (alpha / 4.0).floor()
+        };
+        let b = a + 1524.0;
+        let c = ((b - 122.1) / 365.25).floor();
+        let d = (365.25 * c).floor();
+        let e = ((b - d) / 30.6001).floor();
+        let day = b - d - (30.6001 * e).floor();
+        let month = if e < 14.0 { e - 1.0 } else { e - 13.0 };
+        let year = if month > 2.0 { c - 4716.0 } else { c - 4715.0 };
+        let secs = (f * 86_400.0).round();
+        Moment { year: year as i32, month: month as u32, day: day as u32, hour: (secs / 3600.0).floor() as u32 % 24, minute: ((secs / 60.0).floor() as u32) % 60, second: (secs % 60.0) as f32 }
     }
 
     fn valid(&self) -> bool {

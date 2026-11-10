@@ -852,6 +852,115 @@ macchie dove le bande toccano la pennellata; cratere lunare: l'ombra larga resta
 Limiti: una valle vera parallela alla pennellata e più stretta dell'anello (una banda sottile
 lungo il bordo, il solco attorno al picco centrale di un cratere) viene schiarita anch'essa.
 
+## 5unvicies. Scala, Identifica, Colorazione solare (2026-11-09)
+
+**Scala (scheda "Scala", `ps-core/src/resample.rs`, `ps-app/src/resize_ui.rs`).** Ingrandimento o riduzione
+dell'immagine esportata, senza IA: kernel separabili classici (vicino più prossimo, bilineare, B-spline,
+Mitchell-Netravali B=C=⅓, Catmull-Rom, Lanczos 2/3/4), centri dei pixel allineati, bordo che ripete
+l'ultimo pixel; in riduzione il kernel si allarga di 1/scala (niente aliasing). "Anti-alone": ogni pixel
+d'uscita è tenuto fra minimo e massimo dei 2×2 pixel d'ingresso intorno (miscelato con l'intensità), toglie
+l'anello di Lanczos sul lembo contro il cielo nero. Metodo automatico per tipo (`method_for`): pianeti e
+Saturno Lanczos 3 + anti-alone 1; superfici Lanczos 3 + 0,5; dischi interi (Luna, Sole) Mitchell.
+La dimensione è un solo fattore (proporzioni bloccate) mostrato in %, px o cm a N dpi; massimo ×16 e
+24000 px per lato. Si applica solo all'esportazione (pennellate e maschere restano alla misura originale);
+anteprima a due riquadri (pixel originali / metodo) su un dettaglio al centro del soggetto. Il nome
+esportato prende "ingrandita"/"ridotta". Il DPI non viene ancora scritto nei metadati TIFF/PNG.
+
+**Identifica (pulsante in alto, `ps-core/src/identify.rs`, `moons.rs`, `selene.rs`, `ps-app/src/identify_ui.rs`).**
+Dalla data UT (nome del file o log; correggibile) e dall'oggetto:
+- Giove: lune galileiane col metodo a bassa precisione di Meeus cap. 44, meridiano centrale I e II (cap. 43).
+  Saturno: 8 lune, Meeus cap. 46 (port di `soniakeys/meeus`, MIT), posizione di Saturno dagli elementi
+  kepleriani di `ephemeris.rs` riportati all'eclittica B1950; inclinazione degli anelli (cap. 45).
+  Test: coincidono con gli esempi 44.a e 46.a (attenzione: JD 2451439,5 = 18 settembre 1999).
+- Nell'immagine: regione luminosa più grande (soglia 20 % fra fondo e 50° pixel più luminoso), assi dai
+  momenti, raggio equatoriale = semiasse maggiore (Saturno con anelli aperti: /2,27). Puntini fuori dal
+  pianeta = massimi locali della media 3×3 sopra 6σ. Orientamento = rotazione (±10° attorno all'asse
+  trovato, o 360° se il disco è tondo) e specchio che fanno cadere più lune previste su puntini.
+  Senza lune: asse dalla forma, lato/specchio da verificare (nota nella finestra).
+- Luna (`selene.rs`): posizione con i termini maggiori di Meeus 47, librazione ottica e punto subsolare
+  (cap. 53; test sull'esempio 53.a entro 0,3°), fase, colongitudine. Catalogo di ~100 crateri, 22 mari e
+  qualche monte/valle con coordinate approssimate (~1°). Il lembo si trova con RANSAC su bordi forti in cui
+  la luce cala verso l'esterno (esclude il terminatore), poi Kåsa; orientamento = rotazione e specchio
+  con la massima correlazione fra immagine e un modello (illuminato sì/no × mari scuri 0,55). Se nel campo
+  c'è meno di metà disco è dichiarato "stimato". Nessun lembo: elenco dei crateri sul terminatore.
+- Sole: P, B₀, L₀, rotazione di Carrington (Meeus 29).
+- Convenzione `Orientation`: angolo dell'asse +x dell'oggetto (ovest per i pianeti, est selenografico per
+  la Luna) sull'immagine, in senso orario; 0°/non specchiata = nord in alto, est a sinistra.
+- Interfaccia: finestra con oggetto, data/ora UT, mostra nomi/crateri, orientamento automatico o a mano
+  (rotazione, 180°, specchiata), effemeridi e "come è stato trovato". Calcolo su un thread; nomi disegnati
+  sopra l'immagine (lune verdi trovate / arancio tratteggiate previste; crateri gialli sul terminatore).
+- Diagnosi: `ps-io --example identify -- out.png img [Corpo] [aaaa-mm-gg-hhmm]` disegna le etichette.
+- Limiti: le immagini di prova lunari sono tutte primi piani con un pezzo di lembo; l'orientamento lì è
+  plausibile ma non verificato sul cielo reale. Gli orari dei nomi vecchi (`yy-mm-dd hh-mm-ss`) potrebbero
+  essere ora locale.
+
+**Colorazione solare (modulo `Stage::SunColor`, scheda Colore, `ps-core/src/suncolor.rs`).** Mappa di
+gradiente con un esponente per canale: out_c = L^γ_c sulla luminanza (nero e bianco restano tali). 8
+tavolozze (bianco neutro/caldo, giallo pallido, giallo sole, oro, arancio e rosso H-alfa, viola Calcio K),
+intensità = miscela con l'immagine. Ultimo passo della pipeline (dopo Mineral Moon), immagine sempre RGB.
+Visibile per dischi interi e superfici, acceso ma neutro (intensità 0); Auto = Giallo sole pieno.
+
+### Identifica rivista (2026-11-09, sera)
+
+- **Scheda, non finestra.** "Identifica" è una scheda del pannello laterale (`Group::Identify`, tra le aree e
+  Esporta); il pulsante in alto la seleziona. Calcolo e nomi sull'immagine sono attivi solo mentre la scheda è
+  quella visibile. All'apertura di un file con oggetto e ora noti (nome, log o pixel) la scheda si apre da sola.
+- **Fuso orario automatico.** "Ora locale" chiede al sistema l'offset *della data della ripresa* (`date -r`
+  su macOS, `date -d @` su Linux, `TimeZoneInfo.Local` via PowerShell su Windows), quindi ora legale o solare
+  giusta anche per riprese di mesi fa; ora legale = offset > min(offset di gennaio, di luglio). "Modifica"
+  passa ai valori a mano, "Automatico" torna indietro. Si usa il fuso del computer, non quello del luogo.
+- **Regolazione sulle lune (`identify::fit_time`).** Cerca insieme tempo (±180 min, passo 1 min), rotazione
+  (±6°) e stretching delle distanze (±8 %), con il costo sommato su *tutte* le lune in campo (ogni luna
+  vale `1-(d/tol)²` se cade vicino a un punto luminoso), poi rifinisce a coordinate con tolleranza stretta
+  (0,4×) e penalità piccola su variazioni di tempo/rotazione/scala. Con una sola luna in campo si muove solo
+  il tempo. `Orientation.scale` porta lo stretching (1 = raggio misurato). Parte da sola alla prima
+  identificazione di un'immagine di Giove o Saturno e applica il risultato se almeno 2 lune cadono su un punto.
+- **Raddrizza: nord in alto.** `Orientation::upright()` dà (specchio, gradi); `Geometry::then(mirror, gradi)`
+  compone lo specchio e la rotazione sull'orientamento esistente (gruppo diedrale 2×2 per quarti di giro e
+  specchi, solo il resto ≤45° va nell'angolo fine, con segno invertito se c'è uno specchio prima). Il ritaglio
+  si azzera come per ogni cambio di orientamento.
+- **Nomi stampati (`ps-app/src/annotate.rs`).** Livello disegnato alla risoluzione dell'immagine esportata,
+  dopo l'eventuale ingrandimento: testo dai contorni di Ubuntu Light (stesso font dell'interfaccia) con
+  `skrifa` e un rasterizzatore a copertura esatta (accumulo di aree con segno), alone scuro, cerchi, bussola
+  N/S, didascalia (oggetto, filtro, data/ora UT o locale, scala, angolo del nord e rotazione). "Esporta con
+  i nomi" salva `<nome>_nomi.<formato>` accanto all'originale; l'esportazione normale resta pulita. Opzioni
+  salvate nelle preferenze (`Preferences.identify`).
+- **Posizione con due crateri (2026-11-10, `identify::place_on_craters`).** Per i primi piani lunari senza bordo:
+  nella scheda Identifica (sezione «Posiziona con due crateri», solo Luna) si sceglie un cratere dalla lista (quelli
+  visibili e illuminati all'ora data), lo si clicca sull'immagine, poi un secondo. Due punti fissano similitudine
+  (scala, rotazione, centro del disco) nel piano ortografico del disco, quindi la proiezione vicino al bordo resta
+  giusta; lo specchio non si può ricavare da due punti, lo dà il pulsante «Specchiata». Il risultato è un
+  `Placement {cx, cy, r, orientation}` che `identify_with` usa al posto della ricerca del bordo e
+  dell'orientamento; con la collocazione attiva l'orientamento manuale è bloccato e «Raddrizza» resta. Il clic usa
+  `Tool::Pick` del visore mentre `IdentifyState::awaiting_click()`. Test: `two_craters_place_the_disk`.
+  Precisione limitata dal catalogo (~30 km): conviene scegliere due crateri lontani.
+- **Rilevamento automatico dei crateri (provato e scartato, 2026-11-10).** Hough circolare sul gradiente e filtro ad
+  anello (armoniche cos/sin, FFT, piramide a 4 livelli, ~200 ms) sulle riprese lunari reali: punteggi dominati da
+  bordo della Luna e cornice, crateri grandi e morbidi mancati, ellissi vicino al bordo. Codice rimosso.
+- **Crateri senza effemeridi (non fatto).** Nei primi piani lunari le effemeridi non dicono *dove* siamo sul
+  disco. Metodi possibili: (1) riconoscere i crateri (Hough circolare o rilevamento di cerchi con ombra sul
+  terminatore) e risolvere la posizione come con una "plate solving": confrontare la costellazione di
+  crateri trovati (rapporti di diametri e distanze) con quella del catalogo proiettata con librazione e
+  illuminazione note (geometric hashing); (2) registrare l'immagine su una mappa di riferimento (LRO/Kaguya)
+  resa con la stessa illuminazione; (3) una piccola rete neurale che stima la zona. Il (1) è leggero e senza
+  dati pesanti, ma serve un catalogo molto più fitto (migliaia di crateri) di quello attuale (~100).
+
+## 5duovicies. Lingua dell'interfaccia: italiano e inglese (2026-11-10)
+
+L'interfaccia esiste in italiano e in inglese; si cambia da Impostazioni › LINGUA · LANGUAGE e vale subito, senza riavviare. La scelta è in `Preferences::language`; alla prima apertura segue la lingua del sistema (macOS: `defaults read -g AppleLanguages`; altrove `LANG`), con l'italiano come ripiego. Nei test (`cfg!(test)`) il default resta l'italiano.
+
+**Come funziona** (`ps-core/src/i18n.rs`): i testi nel codice restano in italiano, la lingua originale.
+- `tl("testo italiano")` restituisce l'inglese cercandolo in `i18n_en.rs` (tabella IT → EN, ~820 voci); in italiano, o se manca la voce, restituisce il testo com'è. Costa una ricerca in una HashMap, fatta a ogni fotogramma.
+- `tr!("italiano {}", "english {}", args…)` è il `format!` bilingue: le due versioni stanno una accanto all'altra nel punto d'uso, quindi il compilatore controlla segnaposto e argomenti di entrambe. Per i plurali si passa il suffisso come argomento (in inglese `""`).
+- `tl_dyn(&str)` per nomi non letterali salvati in italiano (il catalogo strumenti: «Nessuno / IR-cut (luminanza)», «Barlow 2,5×»…).
+- `with_lang(lang, || …)` imposta la lingua solo per il thread corrente: i test la usano senza disturbare quelli in parallelo.
+
+**Chiavi che NON si traducono**: `Group::name()` è la chiave salvata in `current_area` (resta italiana); per l'etichetta della scheda c'è `Group::label()`. Gli stessi nomi dei livelli creati restano nella lingua in cui sono nati. Le costanti (`const`) non possono chiamare `tl`: contengono il testo italiano e lo si traduce dove lo si legge (`PLANETS`, `LAYER_SECTIONS`, `SATURN_MOONS`).
+
+**Che cosa è stato reso inglese con attenzione**: «bruciati» → *clipped*, «seeing» e «lembo» → *limb*, «anelli» → *rings*, «mosaico» → *mosaic*, «fuso/ora legale» → *time zone/daylight saving*, «effemeridi» → *ephemerides*, «ritaglio» → *crop*, «Dering» e i nomi dei moduli restano termini tecnici. I nomi dei file esportati seguono la lingua (`Moon`, `Saturn`, `sharpen`, `levels`…). I nomi latini della Luna (Mare Tranquillitatis…) non cambiano.
+
+**Controlli**: `english_interface_has_no_italian_left` apre ogni scheda con tutte le carte aperte, in inglese, e cerca parole italiane in ogni etichetta; `tab_names_are_translated_but_the_saved_key_is_not`, `i18n::tests::*`. Il test di snapshot accetta `PS_SNAPSHOT_EN=1` per produrre le immagini in inglese. Per aggiungere un testo: scrivilo in italiano dentro `tl(...)` e aggiungi la riga in `i18n_en.rs` (il test del dizionario segnala duplicati).
+
 ## 6. Interfaccia
 
 ```

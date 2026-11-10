@@ -25,6 +25,7 @@
 //! What doesn't depend on the strength or the limb protection ([`Prepared`]) can be kept, so
 //! dragging those sliders only recombines the layers.
 
+use crate::i18n::tl;
 use crate::Image;
 use crate::color::{ColorMode, merge_planes, working_planes};
 use crate::wavelet::{ScaleMode, WaveletLayer, WaveletParams, decompose};
@@ -72,20 +73,20 @@ impl SmartCurve {
     pub fn label(self) -> &'static str {
         match self {
             Self::Standard => "Standard",
-            Self::PoorSeeing => "Seeing scarso",
-            Self::GoodSeeing => "Seeing ottimo",
-            Self::Surface => "Luna e superfici",
-            Self::SmoothGlobe => "Globi lisci",
+            Self::PoorSeeing => tl("Seeing scarso"),
+            Self::GoodSeeing => tl("Seeing ottimo"),
+            Self::Surface => tl("Luna e superfici"),
+            Self::SmoothGlobe => tl("Globi lisci"),
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Standard => "Come BlurXTerminator sulle immagini planetarie: il massimo sul dettaglio più fine presente, un po' anche sulle strutture grandi.",
-            Self::PoorSeeing => "Sposta la spinta sulle strutture più grandi (bande, macchie) e lascia stare il dettaglio più fine, che con seeing scarso è soprattutto rumore.",
-            Self::GoodSeeing => "Spinge fino al dettaglio più fine e un po' oltre, tocca meno le strutture grandi. Per immagini nitide e poco rumorose.",
-            Self::Surface => "Spinta larga su tutte le dimensioni: crateri piccoli e grandi, montagne, bordi di ombre. Per la Luna e le riprese ravvicinate.",
-            Self::SmoothGlobe => "Più dolce sul dettaglio finissimo, dove un globo liscio (Saturno, Urano, Venere) mostra solo grana: valorizza bande e divisioni senza macchiettare.",
+            Self::Standard => tl("Come BlurXTerminator sulle immagini planetarie: il massimo sul dettaglio più fine presente, un po' anche sulle strutture grandi."),
+            Self::PoorSeeing => tl("Sposta la spinta sulle strutture più grandi (bande, macchie) e lascia stare il dettaglio più fine, che con seeing scarso è soprattutto rumore."),
+            Self::GoodSeeing => tl("Spinge fino al dettaglio più fine e un po' oltre, tocca meno le strutture grandi. Per immagini nitide e poco rumorose."),
+            Self::Surface => tl("Spinta larga su tutte le dimensioni: crateri piccoli e grandi, montagne, bordi di ombre. Per la Luna e le riprese ravvicinate."),
+            Self::SmoothGlobe => tl("Più dolce sul dettaglio finissimo, dove un globo liscio (Saturno, Urano, Venere) mostra solo grana: valorizza bande e divisioni senza macchiettare."),
         }
     }
 

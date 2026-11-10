@@ -1,6 +1,7 @@
 //! Automatic recognition of what an image shows (planet, Saturn, full lunar/solar disk or
 //! extended surface), its noise level and, when a clean disk edge exists, the blur.
 
+use crate::i18n::tl;
 use crate::Image;
 use crate::align::{self, AlignParams};
 use crate::color::{ColorMode, working_planes};
@@ -28,19 +29,19 @@ impl ImageKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            ImageKind::Planet => "Pianeta",
-            ImageKind::Saturn => "Saturno",
-            ImageKind::FullDisk => "Disco intero",
-            ImageKind::Surface => "Superficie",
+            ImageKind::Planet => tl("Pianeta"),
+            ImageKind::Saturn => tl("Saturno"),
+            ImageKind::FullDisk => tl("Disco intero"),
+            ImageKind::Surface => tl("Superficie"),
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            ImageKind::Planet => "Giove, Marte, Venere…",
-            ImageKind::Saturn => "Con gli anelli",
-            ImageKind::FullDisk => "Luna o Sole interi",
-            ImageKind::Surface => "Dettaglio o mosaico",
+            ImageKind::Planet => tl("Giove, Marte, Venere…"),
+            ImageKind::Saturn => tl("Con gli anelli"),
+            ImageKind::FullDisk => tl("Luna o Sole interi"),
+            ImageKind::Surface => tl("Dettaglio o mosaico"),
         }
     }
 }

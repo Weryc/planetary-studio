@@ -76,7 +76,7 @@ fn main() {
     let mut registax = classic.clone();
     registax.wavelet.params = WaveletParams { scale_mode: ScaleMode::Dyadic, noise_adaptive: 0.0, edge_protection: 0.0, ..classic.wavelet.params.clone() };
     for (j, l) in registax.wavelet.params.layers.iter_mut().enumerate() {
-        *l = WaveletLayer { gain: [4.0, 1.5, 0.3][..].get(j).copied().unwrap_or(0.0), denoise: if j == 0 { 1.0 } else { 0.0 } };
+        *l = WaveletLayer { gain: [4.0, 1.5, 0.3][..].get(j).copied().unwrap_or(0.0), denoise: if j == 0 { 1.0 } else { 0.0 }, ..Default::default() };
     }
     let mut free_plain = free.clone();
     (free_plain.wavelet.params.noise_adaptive, free_plain.wavelet.params.edge_protection) = (0.0, 0.0);

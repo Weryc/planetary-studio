@@ -89,11 +89,14 @@ pub struct WaveletLayer {
     pub gain: f32,
     /// Denoise threshold in units of this layer's noise σ (0 = off).
     pub denoise: f32,
+    /// Multiplies this layer's gain, for when the slider's range isn't enough.
+    #[serde(default = "one")]
+    pub mult: f32,
 }
 
 impl Default for WaveletLayer {
     fn default() -> Self {
-        Self { gain: 0.0, denoise: 0.0 }
+        Self { gain: 0.0, denoise: 0.0, mult: 1.0 }
     }
 }
 
@@ -326,7 +329,7 @@ pub fn response_curve(params: &WaveletParams, freqs: &[f32]) -> Vec<f32> {
         .iter()
         .map(|&f| {
             let (_, h) = responses(params, f, 0.0);
-            1.0 + h.iter().zip(&params.layers).map(|(h, l)| params.amplify * l.gain * h).sum::<f32>()
+            1.0 + h.iter().zip(&params.layers).map(|(h, l)| params.amplify * l.mult * l.gain * h).sum::<f32>()
         })
         .collect()
 }
@@ -375,7 +378,7 @@ pub fn equivalent_gains(from: &WaveletParams, to: &WaveletParams, up_to: f32, sn
                 continue;
             }
             let (_, hf) = responses(from, fx, fy);
-            let want: f64 = from.layers.iter().zip(&hf).zip(&effective_from).map(|((l, h), e)| (from.amplify * l.gain * h * e) as f64).sum();
+            let want: f64 = from.layers.iter().zip(&hf).zip(&effective_from).map(|((l, h), e)| (from.amplify * l.mult * l.gain * h * e) as f64).sum();
             let (_, h) = responses(to, fx, fy);
             let h: Vec<f32> = h.iter().zip(&effective_to).map(|(h, e)| h * e).collect();
             for j in 0..n {
@@ -628,7 +631,7 @@ pub fn recompose(d: &Decomposition, params: &WaveletParams) -> Vec<f32> {
         });
     }
     // (extra gain, threshold, noise scale for the adaptive factor) per layer.
-    let layer_ops: Vec<(f32, f32, f32)> = params.layers.iter().zip(&d.noise).map(|(l, sigma)| (params.amplify * l.gain, l.denoise.max(0.0) * sigma, params.noise_adaptive * sigma)).collect();
+    let layer_ops: Vec<(f32, f32, f32)> = params.layers.iter().zip(&d.noise).map(|(l, sigma)| (params.amplify * l.mult * l.gain, l.denoise.max(0.0) * sigma, params.noise_adaptive * sigma)).collect();
     let soft = params.threshold == ThresholdMode::Soft;
     let protect = params.edge_protection.clamp(0.0, 1.0);
     let edges = (protect > 0.0 && layer_ops.iter().any(|o| o.0 > 0.0)).then(|| d.edges());

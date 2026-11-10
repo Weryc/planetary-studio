@@ -1,6 +1,7 @@
 //! Names of exported files: a base name the user can edit, plus keywords saying what the image
 //! is and what was done to it.
 
+use ps_core::i18n::tl;
 use ps_core::analysis::ImageKind;
 use ps_core::pipeline::Stage;
 use serde::{Deserialize, Serialize};
@@ -26,11 +27,11 @@ impl NameKeyword {
 
     pub fn label(self) -> &'static str {
         match self {
-            NameKeyword::Object => "Oggetto",
-            NameKeyword::Date => "Data",
-            NameKeyword::Time => "Ora",
-            NameKeyword::Modules => "Moduli usati",
-            NameKeyword::Suffix => "Suffisso",
+            NameKeyword::Object => tl("Oggetto"),
+            NameKeyword::Date => tl("Data"),
+            NameKeyword::Time => tl("Ora"),
+            NameKeyword::Modules => tl("Moduli usati"),
+            NameKeyword::Suffix => tl("Suffisso"),
         }
     }
 }
@@ -43,16 +44,17 @@ pub fn module_tag(stage: Stage) -> &'static str {
         Stage::Deconv => "deconv",
         Stage::Denoise => "nr",
         Stage::Wavelet => "wav",
-        Stage::Smart => "nitidezza",
+        Stage::Smart => tl("nitidezza"),
         Stage::Contrast => "usm",
         Stage::Dering => "dering",
-        Stage::Tone => "livelli",
-        Stage::Curves => "curve",
-        Stage::Color => "colore",
-        Stage::Layers => "maschere",
+        Stage::Tone => tl("livelli"),
+        Stage::Curves => tl("curve"),
+        Stage::Color => tl("colore"),
+        Stage::Layers => tl("maschere"),
         Stage::Mineral => "mineral",
-        Stage::Rings => "anelli",
-        Stage::Moons => "lune",
+        Stage::Rings => tl("anelli"),
+        Stage::Moons => tl("lune"),
+        Stage::SunColor => tl("colore-sole"),
     }
 }
 
@@ -74,7 +76,7 @@ pub fn stem(source: &NameSource, keywords: &[NameKeyword]) -> String {
     let capture = capture_time(file).or_else(|| modified_time(source.original));
     let mut name = sanitize(source.base.trim());
     if name.is_empty() {
-        name = "immagine".into();
+        name = tl("immagine").into();
     }
     for k in NameKeyword::ALL.into_iter().filter(|k| keywords.contains(k)) {
         let word = match k {
@@ -102,22 +104,22 @@ fn object(file: &str, kind: ImageKind) -> &'static str {
     let lower = file.to_ascii_lowercase();
     let words: Vec<&str> = lower.split(|c: char| !c.is_ascii_alphabetic()).filter(|w| !w.is_empty()).collect();
     let named = [
-        (&["moon", "luna"][..], "Luna"),
-        (&["sat", "saturn", "saturno"], "Saturno"),
-        (&["jup", "jupiter", "giove"], "Giove"),
-        (&["mars", "marte"], "Marte"),
-        (&["sun", "sole"], "Sole"),
-        (&["ven", "venus", "venere"], "Venere"),
-        (&["mer", "mercury", "mercurio"], "Mercurio"),
-        (&["ura", "uranus", "urano"], "Urano"),
-        (&["nep", "neptune", "nettuno"], "Nettuno"),
+        (&["moon", "luna"][..], tl("Luna")),
+        (&["sat", "saturn", "saturno"], tl("Saturno")),
+        (&["jup", "jupiter", "giove"], tl("Giove")),
+        (&["mars", "marte"], tl("Marte")),
+        (&["sun", "sole"], tl("Sole")),
+        (&["ven", "venus", "venere"], tl("Venere")),
+        (&["mer", "mercury", "mercurio"], tl("Mercurio")),
+        (&["ura", "uranus", "urano"], tl("Urano")),
+        (&["nep", "neptune", "nettuno"], tl("Nettuno")),
     ];
     named.iter().find(|(names, _)| words.iter().any(|w| names.contains(w))).map_or(
         match kind {
-            ImageKind::Saturn => "Saturno",
-            ImageKind::Planet => "Pianeta",
-            ImageKind::FullDisk => "Disco",
-            ImageKind::Surface => "Superficie",
+            ImageKind::Saturn => tl("Saturno"),
+            ImageKind::Planet => tl("Pianeta"),
+            ImageKind::FullDisk => tl("Disco"),
+            ImageKind::Surface => tl("Superficie"),
         },
         |(_, name)| name,
     )

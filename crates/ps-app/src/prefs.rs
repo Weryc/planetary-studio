@@ -1,5 +1,7 @@
 //! User preferences (persisted between sessions) and the Settings window (⌘, / Ctrl+,).
 
+use ps_core::i18n::{Lang, tl};
+use ps_core::tr;
 use crate::theme::{ACCENT, BORDER, SUCCESS, TEXT, TEXT_WEAK};
 use crate::widgets::{segmented, toggle};
 use eframe::egui::{self, RichText, Stroke};
@@ -80,6 +82,15 @@ pub struct Preferences {
     /// Use the graphics card for the heavy processing when there is a suitable one.
     #[serde(default = "yes")]
     pub use_gpu: bool,
+    /// Enlarging (or reducing) the exported image.
+    #[serde(default)]
+    pub resize: crate::resize_ui::ResizeSettings,
+    /// Open the Identifica e annota tab when an image is opened (off: only on request).
+    pub identify_tab_on_open: bool,
+    /// What the Identifica e annota tab prints onto the exported image.
+    pub identify: crate::annotate::LabelOptions,
+    /// Interface language (the first run follows the system's).
+    pub language: ps_core::i18n::Lang,
     /// Format version, to migrate settings saved by older releases. Field-level default (0):
     /// the container-level default would fill in the *current* version and skip migrations.
     #[serde(default)]
@@ -87,6 +98,30 @@ pub struct Preferences {
 }
 
 const VERSION: u32 = 4;
+
+/// English unless the system is set to Italian (read once: it may spawn a process).
+fn system_language() -> ps_core::i18n::Lang {
+    use ps_core::i18n::Lang;
+    // Tests look for the Italian labels.
+    if cfg!(test) {
+        return Lang::It;
+    }
+    static LANG: std::sync::OnceLock<Lang> = std::sync::OnceLock::new();
+    *LANG.get_or_init(|| {
+        let from_env = ["LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty() && s != "C" && s != "POSIX"));
+        // A GUI app on macOS has no LANG: ask the system for the preferred languages.
+        let preferred = from_env.or_else(|| {
+            let out = std::process::Command::new("defaults").args(["read", "-g", "AppleLanguages"]).output().ok()?;
+            out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+        match preferred {
+            Some(s) if s.to_lowercase().trim_start_matches(['(', ' ', '\n', '"']).starts_with("en") => Lang::En,
+            Some(s) if s.to_lowercase().trim_start_matches(['(', ' ', '\n', '"']).starts_with("it") => Lang::It,
+            Some(_) => Lang::En,
+            None => Lang::It,
+        }
+    })
+}
 
 fn yes() -> bool {
     true
@@ -103,6 +138,8 @@ pub enum Group {
     Tone,
     Color,
     Regions,
+    /// Not a group of modules: what the image shows (moons, craters), from the ephemerides.
+    Identify,
     /// Not a group of modules: the export tab.
     Export,
 }
@@ -117,7 +154,23 @@ impl Group {
             Group::Tone => "Curve e livelli",
             Group::Color => "Colore",
             Group::Regions => "Maschere",
+            Group::Identify => "Identifica e annota",
             Group::Export => "Esporta",
+        }
+    }
+
+    /// The name shown on the tab (the Italian `name` stays the stable key saved in preferences).
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Favorites => tl("Preferiti"),
+            Group::Sharpness => tl("Nitidezza"),
+            Group::Corrections => tl("Correzione artefatti"),
+            Group::Noise => tl("Rumore"),
+            Group::Tone => tl("Curve e livelli"),
+            Group::Color => tl("Colore"),
+            Group::Regions => tl("Maschere"),
+            Group::Identify => tl("Identifica e annota"),
+            Group::Export => tl("Esporta"),
         }
     }
 
@@ -130,6 +183,7 @@ impl Group {
             Group::Tone => ICON_SHOW_CHART,
             Group::Color => ICON_PALETTE,
             Group::Regions => ICON_LAYERS,
+            Group::Identify => ICON_TRAVEL_EXPLORE,
             Group::Export => ICON_IOS_SHARE,
         }
     }
@@ -140,7 +194,7 @@ impl Group {
             Stage::Dering => Group::Corrections,
             Stage::Denoise => Group::Noise,
             Stage::Tone | Stage::Curves => Group::Tone,
-            Stage::Align | Stage::Color | Stage::Mineral => Group::Color,
+            Stage::Align | Stage::Color | Stage::Mineral | Stage::SunColor => Group::Color,
             Stage::Rings | Stage::Moons | Stage::Layers => Group::Regions,
         }
     }
@@ -154,6 +208,8 @@ pub fn relevant(stage: Stage, kind: ImageKind, mono: bool) -> bool {
     match stage {
         Stage::Align | Stage::Color => !mono,
         Stage::Mineral => !mono && matches!(kind, ImageKind::FullDisk | ImageKind::Surface),
+        // Solar frames are full disks or close-ups.
+        Stage::SunColor => matches!(kind, ImageKind::FullDisk | ImageKind::Surface),
         Stage::Rings => kind == ImageKind::Saturn,
         Stage::Moons => matches!(kind, ImageKind::Planet | ImageKind::Saturn),
         _ => true,
@@ -177,6 +233,7 @@ impl Default for Preferences {
             (Stage::Color, Visible),
             (Stage::Layers, Visible),
             (Stage::Mineral, Visible),
+            (Stage::SunColor, Visible),
         ]
         .into_iter()
         .map(|(stage, visibility)| ModulePref { stage, visibility })
@@ -202,6 +259,10 @@ impl Default for Preferences {
             auto_strength: Default::default(),
             wavelet_scales: free_scales(),
             use_gpu: true,
+            resize: Default::default(),
+            identify_tab_on_open: false,
+            identify: Default::default(),
+            language: system_language(),
             version: VERSION,
         }
     }
@@ -222,6 +283,7 @@ pub fn stage_icon(stage: Stage) -> MaterialIcon {
         Stage::Color => ICON_PALETTE,
         Stage::Layers => ICON_LAYERS,
         Stage::Mineral => ICON_NIGHTLIGHT,
+        Stage::SunColor => ICON_WB_SUNNY,
         Stage::Rings => ICON_ORBIT,
         Stage::Moons => ICON_BUBBLE_CHART,
     }
@@ -321,6 +383,7 @@ impl Preferences {
                 }
                 Stage::Layers => p.layers.iter_mut().for_each(|l| l.enabled = false),
                 Stage::Mineral => p.mineral.enabled = false,
+                Stage::SunColor => p.suncolor.enabled = false,
                 Stage::Dering => p.dering.enabled = false,
                 // Listed among the masks, not as modules (see `upgraded`).
                 Stage::Rings | Stage::Moons => {}
@@ -358,9 +421,9 @@ impl SettingsWindow {
             ui.set_width(520.0);
             ui.horizontal(|ui| {
                 ui.label(ICON_SETTINGS.rich_text().size(20.0).color(ACCENT));
-                ui.label(RichText::new("Impostazioni").size(17.0).strong().color(TEXT));
+                ui.label(RichText::new(tl("Impostazioni")).size(17.0).strong().color(TEXT));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if crate::widgets::icon_button(ui, ICON_CLOSE, "Chiudi (Esc)").clicked() {
+                    if crate::widgets::icon_button(ui, ICON_CLOSE, tl("Chiudi (Esc)")).clicked() {
                         self.open = false;
                     }
                 });
@@ -369,59 +432,67 @@ impl SettingsWindow {
             // Taller than small windows: scroll, keeping the title in view.
             let max_height = (ctx.content_rect().height() - 140.0).max(200.0);
             egui::ScrollArea::vertical().max_height(max_height).min_scrolled_height(max_height.min(720.0)).auto_shrink([false, true]).show(ui, |ui| {
+                // Shown in both languages, so it can be found whichever one is on.
+                section(ui, "LINGUA · LANGUAGE");
+                if crate::widgets::segmented(ui, &mut prefs.language, &[(Lang::It, None, Lang::It.native_name()), (Lang::En, None, Lang::En.native_name())]) {
+                    ps_core::i18n::set_lang(prefs.language);
+                }
+                ui.add_space(14.0);
                 self.modules_section(ui, prefs);
                 ui.add_space(14.0);
                 self.bxt_section(ui, prefs);
                 ui.add_space(14.0);
-                section(ui, "APERTURA DELLE IMMAGINI");
+                section(ui, tl("APERTURA DELLE IMMAGINI"));
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.auto_structure);
-                    ui.label("Scegli le impostazioni avanzate (PSF, livelli, kernel…) in base all'immagine");
+                    ui.label(tl("Scegli le impostazioni avanzate (PSF, livelli, kernel…) in base all'immagine"));
                 });
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.auto_settings);
-                    ui.label("Applica subito anche nitidezza e riduzione del rumore automatiche");
+                    ui.label(tl("Applica subito anche nitidezza e riduzione del rumore automatiche"));
                 });
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.adapt_to_image);
-                    ui.label("Mostra solo i moduli adatti all'immagine aperta");
+                    ui.label(tl("Mostra solo i moduli adatti all'immagine aperta"));
+                });
+                ui.horizontal(|ui| {
+                    toggle(ui, &mut prefs.identify_tab_on_open);
+                    ui.label(tl("Apri subito la scheda «Identifica e annota» se conosco oggetto e data"));
                 });
                 ui.add_space(14.0);
-                section(ui, "PRESTAZIONI");
+                section(ui, tl("PRESTAZIONI"));
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.use_gpu);
-                    ui.label("Usa la scheda grafica (GPU)");
+                    ui.label(tl("Usa la scheda grafica (GPU)"));
                 });
                 hint(
                     ui,
                     &match ps_core::gpu::status() {
-                        None => "Ricerca della GPU in corso…".to_string(),
-                        Some(None) => "Nessuna GPU utilizzabile: si usa il processore.".to_string(),
-                        Some(Some(gpu)) if gpu.shared_memory => format!(
-                            "{}: deconvoluzione, riduzione del rumore, wavelet, contrasto, dering e maschere. Il risultato è lo stesso del processore.",
+                        None => tl("Ricerca della GPU in corso…").to_string(),
+                        Some(None) => tl("Nessuna GPU utilizzabile: si usa il processore.").to_string(),
+                        Some(Some(gpu)) if gpu.shared_memory => tr!("{}: deconvoluzione, riduzione del rumore, wavelet, contrasto, dering e maschere. Il risultato è lo stesso del processore.", "{}: deconvolution, noise reduction, wavelets, contrast, dering and masks. The result is the same as on the processor.",
                             gpu.name
                         ),
-                        Some(Some(gpu)) => format!(
-                            "{}: deconvoluzione e riduzione del rumore Luna e Sole. Le operazioni leggere restano sul processore: su una scheda separata trasferire l'immagine costerebbe quanto calcolarla. Il risultato è lo stesso.",
+                        Some(Some(gpu)) => tr!("{}: deconvoluzione e riduzione del rumore Luna e Sole. Le operazioni leggere restano sul processore: su una scheda separata trasferire l'immagine costerebbe quanto calcolarla. Il risultato è lo stesso.", "{}: deconvolution and Moon and Sun noise reduction. Light operations stay on the processor: on a separate card, transferring the image would cost as much as computing it. The result is the same.",
                             gpu.name
                         ),
                     },
                 );
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.fast_preview);
-                    ui.label("Anteprima rapida mentre muovi un cursore");
+                    ui.label(tl("Anteprima rapida mentre muovi un cursore"));
                 });
-                hint(ui, "Durante il trascinamento elabora l'immagine ridotta (approssimata); al rilascio torna a piena risoluzione.");
+                hint(ui, tl("Durante il trascinamento elabora l'immagine ridotta (approssimata); al rilascio torna a piena risoluzione."));
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.memory_saving);
-                    ui.label("Risparmia memoria");
+                    ui.label(tl("Risparmia memoria"));
                 });
-                hint(ui, "Tiene in memoria solo i passi lenti (deconvoluzione, rumore, wavelet…) e ricalcola quelli rapidi. Utile con immagini grandi e poca RAM.");
+                hint(ui, tl("Tiene in memoria solo i passi lenti (deconvoluzione, rumore, wavelet…) e ricalcola quelli rapidi. Utile con immagini grandi e poca RAM."));
                 ui.add_space(14.0);
-                section(ui, "PANNELLO");
+                section(ui, tl("PANNELLO"));
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.one_group_open);
-                    ui.label("Tieni aperta una sola scheda alla volta");
+                    ui.label(tl("Tieni aperta una sola scheda alla volta"));
                 });
             });
         });
@@ -431,8 +502,8 @@ impl SettingsWindow {
     }
 
     fn modules_section(&mut self, ui: &mut egui::Ui, prefs: &mut Preferences) {
-        section(ui, "MODULI DEL PANNELLO");
-        ui.label(RichText::new("I preferiti stanno in cima; i moduli nascosti non vengono né mostrati né applicati.").small().color(TEXT_WEAK));
+        section(ui, tl("MODULI DEL PANNELLO"));
+        ui.label(RichText::new(tl("I preferiti stanno in cima; i moduli nascosti non vengono né mostrati né applicati.")).small().color(TEXT_WEAK));
         ui.add_space(6.0);
         let stages: Vec<Stage> = prefs.modules.iter().map(|m| m.stage).collect();
         ui.spacing_mut().item_spacing.y = 4.0;
@@ -443,9 +514,9 @@ impl SettingsWindow {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut v = prefs.visibility(stage);
                     let options = [
-                        (Visibility::Favorite, Some(ICON_STAR), "Preferito"),
-                        (Visibility::Visible, Some(ICON_VISIBILITY), "Visibile"),
-                        (Visibility::Hidden, Some(ICON_VISIBILITY_OFF), "Nascosto"),
+                        (Visibility::Favorite, Some(ICON_STAR), tl("Preferito")),
+                        (Visibility::Visible, Some(ICON_VISIBILITY), tl("Visibile")),
+                        (Visibility::Hidden, Some(ICON_VISIBILITY_OFF), tl("Nascosto")),
                     ];
                     if segmented(ui, &mut v, &options) {
                         prefs.set_visibility(stage, v);
@@ -462,32 +533,32 @@ impl SettingsWindow {
             if toggle(ui, &mut enabled).changed() {
                 prefs.set_visibility(Stage::Bxt, if enabled { Visibility::Visible } else { Visibility::Hidden });
             }
-            ui.label("Usa BlurXTerminator (strumento a riga di comando rc-astro)");
+            ui.label(tl("Usa BlurXTerminator (strumento a riga di comando rc-astro)"));
         });
         ui.label(
-            RichText::new("Richiede il tool stand-alone di RC Astro e una licenza attiva di BlurXTerminator.")
+            RichText::new(tl("Richiede il tool stand-alone di RC Astro e una licenza attiva di BlurXTerminator."))
                 .small()
                 .color(TEXT_WEAK),
         );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let path = prefs.bxt_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "non trovato".into());
-            ui.label(RichText::new("Eseguibile").color(TEXT_WEAK));
+            let path = prefs.bxt_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| tl("non trovato").into());
+            ui.label(RichText::new(tl("Eseguibile")).color(TEXT_WEAK));
             ui.add(egui::Label::new(RichText::new(path).monospace().small()).truncate());
         });
         ui.horizontal(|ui| {
-            if ui.button((ICON_SEARCH.rich_text(), "Cerca automaticamente")).clicked() {
+            if ui.button((ICON_SEARCH.rich_text(), tl("Cerca automaticamente"))).clicked() {
                 prefs.bxt_path = ps_core::bxt::find_executable();
-                self.check_result = prefs.bxt_path.is_none().then(|| Err("rc-astro non trovato: indicalo con Sfoglia".to_string()));
+                self.check_result = prefs.bxt_path.is_none().then(|| Err(tl("rc-astro non trovato: indicalo con Sfoglia").to_string()));
             }
-            if ui.button((ICON_FOLDER_OPEN.rich_text(), "Sfoglia…")).clicked()
-                && let Some(p) = rfd::FileDialog::new().set_title("Seleziona l'eseguibile rc-astro").pick_file()
+            if ui.button((ICON_FOLDER_OPEN.rich_text(), tl("Sfoglia…"))).clicked()
+                && let Some(p) = rfd::FileDialog::new().set_title(tl("Seleziona l'eseguibile rc-astro")).pick_file()
             {
                 prefs.bxt_path = Some(p);
                 self.check_result = None;
             }
             let can_check = self.check.is_none() && prefs.bxt_executable().is_some();
-            if ui.add_enabled(can_check, egui::Button::new((ICON_VERIFIED.rich_text(), "Verifica"))).clicked()
+            if ui.add_enabled(can_check, egui::Button::new((ICON_VERIFIED.rich_text(), tl("Verifica")))).clicked()
                 && let Some(exe) = prefs.bxt_executable()
             {
                 let (tx, rx) = channel();
@@ -545,6 +616,19 @@ mod tests {
 
     fn shown(p: &Preferences, kind: ImageKind, mono: bool) -> Vec<Stage> {
         p.panel_layout(kind, mono).into_iter().flat_map(|(_, s)| s).collect()
+    }
+
+    #[test]
+    fn tab_names_are_translated_but_the_saved_key_is_not() {
+        let all = [Group::Favorites, Group::Sharpness, Group::Corrections, Group::Noise, Group::Tone, Group::Color, Group::Regions, Group::Identify, Group::Export];
+        ps_core::i18n::with_lang(Lang::En, || {
+            for g in all {
+                assert_eq!(g.label(), ps_core::i18n::tl(g.name()), "{:?} label matches its key's translation", g);
+                assert_ne!(g.label(), "", "{g:?}");
+            }
+            assert_eq!(Group::Corrections.label(), "Artefact correction");
+            assert_eq!(Group::Identify.name(), "Identifica e annota");
+        });
     }
 
     #[test]

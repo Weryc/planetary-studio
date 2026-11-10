@@ -60,7 +60,7 @@ pub fn denoise(img: &Image, p: &NoiseParams) -> Image {
         NoiseMethod::Planetary => {
             // Thresholds per scale in units of that scale's noise σ (finest first).
             let k = [2.2, 1.4, 0.7].map(|v| v * p.strength);
-            let layers = k.iter().map(|&denoise| WaveletLayer { gain: 0.0, denoise }).collect();
+            let layers = k.iter().map(|&denoise| WaveletLayer { gain: 0.0, denoise, ..Default::default() }).collect();
             let params = WaveletParams { layers, threshold: ThresholdMode::Soft, scale_mode: ScaleMode::Dyadic, ..Default::default() };
             let mut d = decompose(&y, w, h, &params, &|| false).expect("never cancelled");
             // The thresholds above were tuned on the white-noise estimate.

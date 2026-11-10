@@ -4,7 +4,7 @@
 //! ```text
 //! source → RGB align → BlurXTerminator → deconvolution ─┬→ finishing ──────────┐
 //!                                                       └→ layer k: finishing_k ┤ blend by mask
-//!                                                                               └→ Mineral Moon → out
+//!                                                                               └→ Mineral Moon → solar colour → out
 //! finishing = noise reduction → wavelets → contrast → dering → levels/curves → colour
 //! ```
 //! Deconvolution is shared: the blur is the same everywhere. Each layer re-runs the finishing
@@ -12,6 +12,7 @@
 //! global ones for the rest, and is blended over the base through its mask. Deringing lifts the
 //! ring the user painted over ([`RING_MASK`]) and uses the global settings.
 
+use crate::i18n::tl;
 use crate::Image;
 use crate::adjust::{ColorParams, MineralParams, apply_color, apply_mineral};
 use crate::align::{self, AlignParams};
@@ -23,6 +24,7 @@ use crate::enhance::{self, ContrastParams, NoiseParams, ToneParams};
 use crate::mask::MaskSpec;
 use crate::psf::Psf;
 use crate::smart::SmartParams;
+use crate::suncolor::SunColorParams;
 use crate::wavelet::{Decomposition, DecompositionKey, ScaleMode, WaveletParams, decompose, recompose};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -123,6 +125,8 @@ pub struct Pipeline {
     pub color: Module<ColorParams>,
     pub layers: Vec<Layer>,
     pub mineral: Module<MineralParams>,
+    /// False colour for solar images (yellows, whites, H-alpha orange…).
+    pub suncolor: Module<SunColorParams>,
 }
 
 impl Default for Pipeline {
@@ -141,6 +145,7 @@ impl Default for Pipeline {
             color: Module::on(ColorParams::default()),
             layers: Vec::new(),
             mineral: Module::off(MineralParams::default()),
+            suncolor: Module::off(SunColorParams::neutral()),
         }
     }
 }
@@ -241,11 +246,13 @@ pub enum Stage {
     /// Panel cards for the dedicated Saturn-rings and moons layers (processed as layers).
     Rings,
     Moons,
+    /// False colour for solar images.
+    SunColor,
 }
 
 impl Stage {
     /// Every stage, in processing order.
-    pub const ALL: [Stage; 15] = [
+    pub const ALL: [Stage; 16] = [
         Stage::Align,
         Stage::Bxt,
         Stage::Deconv,
@@ -261,25 +268,27 @@ impl Stage {
         Stage::Rings,
         Stage::Moons,
         Stage::Mineral,
+        Stage::SunColor,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
-            Stage::Align => "Allineamento RGB",
+            Stage::Align => tl("Allineamento RGB"),
             Stage::Bxt => "BlurXTerminator",
-            Stage::Deconv => "Deconvoluzione",
-            Stage::Denoise => "Riduzione rumore",
+            Stage::Deconv => tl("Deconvoluzione"),
+            Stage::Denoise => tl("Riduzione rumore"),
             Stage::Wavelet => "Wavelet",
-            Stage::Smart => "Nitidezza finale",
-            Stage::Contrast => "Contrasto",
+            Stage::Smart => tl("Nitidezza finale"),
+            Stage::Contrast => tl("Contrasto"),
             Stage::Dering => "Dering",
-            Stage::Tone => "Livelli tonali",
-            Stage::Curves => "Curve",
-            Stage::Color => "Colore",
-            Stage::Layers => "Maschere",
+            Stage::Tone => tl("Livelli tonali"),
+            Stage::Curves => tl("Curve"),
+            Stage::Color => tl("Colore"),
+            Stage::Layers => tl("Maschere"),
             Stage::Mineral => "Mineral Moon",
-            Stage::Rings => "Anelli di Saturno",
-            Stage::Moons => "Lune",
+            Stage::Rings => tl("Anelli di Saturno"),
+            Stage::Moons => tl("Lune"),
+            Stage::SunColor => tl("Colorazione solare"),
         }
     }
 }
@@ -450,6 +459,7 @@ pub struct Processor {
     layers: HashMap<u64, Option<Slot<LayerKey>>>,
     blend: Option<Slot<Vec<(u64, u64)>>>,
     mineral: Option<Slot<(MineralParams, u64)>>,
+    suncolor: Option<Slot<SunColorParams>>,
     gamut: Option<Slot<()>>,
     decompositions: Vec<WaveletCache>,
 }
@@ -493,7 +503,7 @@ impl Processor {
 
         if p.bxt.enabled {
             match aux.bxt_executable {
-                None => warnings.push((Stage::Bxt, "eseguibile rc-astro non configurato nelle Impostazioni".to_string())),
+                None => warnings.push((Stage::Bxt, tl("eseguibile rc-astro non configurato nelle Impostazioni").to_string())),
                 Some(exe) => {
                     let start = Instant::now();
                     if let Some(hit) = lookup(&self.bxt, frame.1, &p.bxt.params) {
@@ -712,12 +722,16 @@ impl Processor {
             let (lum, lum_gen) = match &aux.luminance {
                 Some((plane, g)) if plane.len() == frame.0.width() * frame.0.height() => (Some(plane.as_slice()), *g),
                 Some(_) => {
-                    warnings.push((Stage::Mineral, "la luminanza LRGB ha dimensioni diverse dall'immagine".to_string()));
+                    warnings.push((Stage::Mineral, tl("la luminanza LRGB ha dimensioni diverse dall'immagine").to_string()));
                     (None, 0)
                 }
                 None => (None, 0),
             };
             stage!(Stage::Mineral, self.mineral, (p.mineral.params.clone(), lum_gen), |img: &Image| Some(apply_mineral(img, &p.mineral.params, lum)));
+        }
+
+        if p.suncolor.enabled && !p.suncolor.params.is_neutral() {
+            stage!(Stage::SunColor, self.suncolor, p.suncolor.params.clone(), |img: &Image| Some(crate::suncolor::apply(img, &p.suncolor.params)));
         }
 
         // Colours pushed outside 0‥1 are brought back by desaturating, not by clipping channels.
@@ -753,6 +767,7 @@ impl Processor {
         self.color = None;
         self.blend = None;
         self.mineral = None;
+        self.suncolor = None;
         self.gamut = None;
     }
 }

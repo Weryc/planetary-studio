@@ -2,11 +2,14 @@
 
 mod app;
 mod history;
+mod annotate;
+mod identify_ui;
 mod instrument;
 mod mosaic_ui;
 mod naming;
 mod panels;
 mod prefs;
+mod resize_ui;
 mod theme;
 mod viewer;
 mod widgets;

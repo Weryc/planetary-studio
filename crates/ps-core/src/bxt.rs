@@ -3,6 +3,8 @@
 //! comes back as 32-bit float TIFF, so nothing is lost in the round trip. (FITS was tried first,
 //! but rc-astro reads and writes its row order inconsistently, returning the image flipped.)
 
+use crate::i18n::tl;
+use crate::tr;
 use crate::Image;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -67,7 +69,7 @@ pub fn run_passes(img: &Image, p: &BxtParams, executable: &Path, cancel: &dyn Fn
 pub fn run(img: &Image, p: &BxtParams, executable: &Path, cancel: &dyn Fn() -> bool) -> Result<Option<Image>, String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!("planetary-studio-bxt-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cartella temporanea: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| tr!("cartella temporanea: {e}", "temporary folder: {e}"))?;
     let result = run_in(&dir, img, p, executable, cancel);
     std::fs::remove_dir_all(&dir).ok();
     result
@@ -75,7 +77,7 @@ pub fn run(img: &Image, p: &BxtParams, executable: &Path, cancel: &dyn Fn() -> b
 
 fn run_in(dir: &Path, img: &Image, p: &BxtParams, executable: &Path, cancel: &dyn Fn() -> bool) -> Result<Option<Image>, String> {
     let (input, output, log) = (dir.join("in.tif"), dir.join("out.tif"), dir.join("log.txt"));
-    write_tiff_f32(&input, img).map_err(|e| format!("scrittura file temporaneo: {e}"))?;
+    write_tiff_f32(&input, img).map_err(|e| tr!("scrittura file temporaneo: {e}", "writing temporary file: {e}"))?;
     let log_file = std::fs::File::create(&log).map_err(|e| e.to_string())?;
 
     let mut cmd = Command::new(executable);
@@ -97,7 +99,7 @@ fn run_in(dir: &Path, img: &Image, p: &BxtParams, executable: &Path, cancel: &dy
     }
     cmd.stdin(Stdio::null()).stdout(log_file.try_clone().map_err(|e| e.to_string())?).stderr(log_file);
 
-    let mut child = cmd.spawn().map_err(|e| format!("impossibile avviare {}: {e}", executable.display()))?;
+    let mut child = cmd.spawn().map_err(|e| tr!("impossibile avviare {}: {e}", "cannot start {}: {e}", executable.display()))?;
     let status = loop {
         if cancel() {
             child.kill().ok();
@@ -111,12 +113,12 @@ fn run_in(dir: &Path, img: &Image, p: &BxtParams, executable: &Path, cancel: &dy
     };
     if !status.success() {
         let text = std::fs::read_to_string(&log).unwrap_or_default();
-        let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("nessun messaggio");
-        return Err(format!("rc-astro è terminato con errore ({status}): {last}"));
+        let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(tl("nessun messaggio"));
+        return Err(tr!("rc-astro è terminato con errore ({status}): {last}", "rc-astro ended with an error ({status}): {last}"));
     }
-    let out = read_tiff_f32(&output).map_err(|e| format!("lettura del risultato: {e}"))?;
+    let out = read_tiff_f32(&output).map_err(|e| tr!("lettura del risultato: {e}", "reading the result: {e}"))?;
     if out.width() != img.width() || out.height() != img.height() || out.channels().len() != img.channels().len() {
-        return Err("il risultato ha dimensioni diverse dall'originale".into());
+        return Err(tl("il risultato ha dimensioni diverse dall'originale").into());
     }
     Ok(Some(Image::new(out.width(), out.height(), out.channels().to_vec(), img.source_bit_depth)))
 }
@@ -148,14 +150,14 @@ fn read_tiff_f32(path: &Path) -> Result<Image, String> {
         ColorType::GrayA(_) => 2,
         ColorType::RGB(_) => 3,
         ColorType::RGBA(_) => 4,
-        other => return Err(format!("formato colore non supportato: {other:?}")),
+        other => return Err(tr!("formato colore non supportato: {other:?}", "unsupported colour format: {other:?}")),
     };
     let data: Vec<f32> = match decoder.read_image().map_err(|e| e.to_string())? {
         DecodingResult::F32(v) => v,
         DecodingResult::F64(v) => v.into_iter().map(|x| x as f32).collect(),
         DecodingResult::U16(v) => v.into_iter().map(|x| x as f32 / 65535.0).collect(),
         DecodingResult::U8(v) => v.into_iter().map(|x| x as f32 / 255.0).collect(),
-        _ => return Err("profondità di bit non supportata".into()),
+        _ => return Err(tl("profondità di bit non supportata").into()),
     };
     let planes = if stride >= 3 { 3 } else { 1 };
     let channels = (0..planes).map(|c| data.iter().skip(c).step_by(stride).copied().collect()).collect();
@@ -219,12 +221,12 @@ pub fn find_executable() -> Option<PathBuf> {
 
 /// Ask the tool for its licence status, to check the configuration. Times out after 15 s.
 pub fn check(executable: &Path) -> Result<String, String> {
-    let mut child = Command::new(executable).args(["bxt", "--license"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("impossibile avviare: {e}"))?;
+    let mut child = Command::new(executable).args(["bxt", "--license"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| tr!("impossibile avviare: {e}", "cannot start: {e}"))?;
     let start = Instant::now();
     while child.try_wait().map_err(|e| e.to_string())?.is_none() {
         if start.elapsed() > Duration::from_secs(15) {
             child.kill().ok();
-            return Err("nessuna risposta entro 15 s".into());
+            return Err(tl("nessuna risposta entro 15 s").into());
         }
         std::thread::sleep(Duration::from_millis(50));
     }

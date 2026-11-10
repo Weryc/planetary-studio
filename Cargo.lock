@@ -2519,12 +2519,14 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "egui_material_icons",
+ "epaint_default_fonts",
  "ps-core",
  "ps-io",
  "rayon",
  "rfd",
  "serde",
  "serde_json",
+ "skrifa",
  "winresource",
 ]
 

@@ -7,6 +7,8 @@
 //! - **simple** settings (how much sharpening, how much noise reduction) are left to the user,
 //!   or filled in on request by [`auto_pipeline`].
 
+use crate::i18n::tl;
+use crate::tr;
 use crate::adjust::ColorParams;
 use crate::analysis::{Analysis, ImageKind};
 use crate::bxt::BxtParams;
@@ -205,9 +207,9 @@ pub enum AutoStrength {
 impl AutoStrength {
     pub fn label(self) -> &'static str {
         match self {
-            AutoStrength::Gentle => "Delicato",
-            AutoStrength::Normal => "Normale",
-            AutoStrength::Strong => "Forte",
+            AutoStrength::Gentle => tl("Delicato"),
+            AutoStrength::Normal => tl("Normale"),
+            AutoStrength::Strong => tl("Forte"),
         }
     }
 
@@ -318,7 +320,7 @@ pub fn auto_pipeline_with(kind: ImageKind, analysis: &Analysis, strength: AutoSt
     for (j, layer) in classic.layers.iter_mut().enumerate() {
         let k = j + classic.base_step as usize - 1;
         // The noise-reduction module does most of the work; wavelets keep a lighter touch.
-        *layer = WaveletLayer { gain: gains * b.gains.get(k).copied().unwrap_or(0.0), denoise: 0.5 * b.denoise.get(k).copied().unwrap_or(0.0) * noise };
+        *layer = WaveletLayer { gain: gains * b.gains.get(k).copied().unwrap_or(0.0), denoise: 0.5 * b.denoise.get(k).copied().unwrap_or(0.0) * noise, ..Default::default() };
     }
     // Free scales sharpen the real detail as much as the classic ones would.
     let wavelet = if scales == ScaleMode::Free { convert_scales(kind, analysis, &classic, ScaleMode::Free) } else { classic };
@@ -368,7 +370,7 @@ pub fn convert_scales(kind: ImageKind, analysis: &Analysis, current: &WaveletPar
         out.grain_denoise = thresholds.remove(0);
     }
     for (j, layer) in out.layers.iter_mut().enumerate() {
-        *layer = WaveletLayer { gain: gains[j], denoise: thresholds.get(j).copied().unwrap_or(0.0) };
+        *layer = WaveletLayer { gain: gains[j], denoise: thresholds.get(j).copied().unwrap_or(0.0), ..Default::default() };
     }
     out
 }
@@ -415,6 +417,7 @@ fn nothing_applied(p: Pipeline) -> Pipeline {
         curves: Module::on(ToneParams::default()),
         color: Module::on(ColorParams::default()),
         mineral: Module::on(crate::adjust::MineralParams::neutral()),
+        suncolor: Module::on(crate::suncolor::SunColorParams::neutral()),
         layers: p.layers,
     }
 }
@@ -434,8 +437,8 @@ pub fn auto_color(kind: ImageKind, img: &crate::Image) -> [f32; 3] {
 /// Add the layer behind the "Anelli di Saturno" or "Lune" card, set up for its job.
 pub fn add_role_layer(p: &mut Pipeline, role: LayerRole) -> u64 {
     let (name, region, feather) = match role {
-        LayerRole::Rings => ("Anelli di Saturno", AutoRegion::SaturnRings, 2.0),
-        LayerRole::Moons => ("Lune", AutoRegion::Moons, 1.5),
+        LayerRole::Rings => (tl("Anelli di Saturno"), AutoRegion::SaturnRings, 2.0),
+        LayerRole::Moons => (tl("Lune"), AutoRegion::Moons, 1.5),
     };
     let id = p.add_layer(name, MaskSpec::new(MaskShape::Auto(region), feather));
     let base_wavelet = p.wavelet.params.clone();
@@ -474,10 +477,10 @@ pub fn explain(kind: ImageKind, analysis: &Analysis, scales: ScaleMode) -> Expla
     let b = base(kind);
     let sigma = psf_sigma(kind, analysis);
     let what = match kind {
-        ImageKind::Planet => "il pianeta",
-        ImageKind::Saturn => "Saturno con gli anelli",
-        ImageKind::FullDisk => "il disco",
-        ImageKind::Surface => "l'immagine",
+        ImageKind::Planet => tl("il pianeta"),
+        ImageKind::Saturn => tl("Saturno con gli anelli"),
+        ImageKind::FullDisk => tl("il disco"),
+        ImageKind::Surface => tl("l'immagine"),
     };
     let measured = analysis.psf_sigma.filter(|_| kind == analysis.kind);
     let core = analysis.spectral.and(detail_cutoff(analysis));
@@ -485,97 +488,90 @@ pub fn explain(kind: ImageKind, analysis: &Analysis, scales: ScaleMode) -> Expla
         (Some(cutoff), limb) => {
             let (fwhm, beta) = (2.3548 * blur_core(kind, analysis), moffat_beta(kind, analysis));
             let limb = limb.map_or(String::new(), |m| {
-                format!(" Il bordo del disco darebbe σ {m:.1} px, ma è allargato dall'oscuramento al bordo e dalle ali del seeing: una PSF così larga trasformerebbe i dettagli in macchie e contorni.")
+                tr!(" Il bordo del disco darebbe σ {m:.1} px, ma è allargato dall'oscuramento al bordo e dalle ali del seeing: una PSF così larga trasformerebbe i dettagli in macchie e contorni.", " The disk edge would give σ {m:.1} px, but it is widened by limb darkening and the seeing wings: a PSF that wide would turn details into blotches and outlines.")
             });
-            format!(
-                "PSF di Moffat, FWHM {fwhm:.1} px, β {beta:.1}: il nucleo viene dallo spettro (il dettaglio finisce a un periodo di {:.1} px), le ali larghe sono quelle tipiche del seeing.{limb}",
+            tr!("PSF di Moffat, FWHM {fwhm:.1} px, β {beta:.1}: il nucleo viene dallo spettro (il dettaglio finisce a un periodo di {:.1} px), le ali larghe sono quelle tipiche del seeing.{limb}", "Moffat PSF, FWHM {fwhm:.1} px, β {beta:.1}: the core comes from the spectrum (detail ends at a period of {:.1} px), the broad wings are typical of seeing.{limb}",
                 1.0 / cutoff
             )
         }
         (None, measured) => match measured {
-            Some(m) => format!(
-                "PSF gaussiana σ {sigma:.2} px: l'85 % della sfocatura misurata sul bordo del disco (σ {m:.2} px). È un po' più piccola apposta: una PSF troppo grande crea aloni, una troppo piccola rende solo meno nitido."
+            Some(m) => tr!("PSF gaussiana σ {sigma:.2} px: l'85 % della sfocatura misurata sul bordo del disco (σ {m:.2} px). È un po' più piccola apposta: una PSF troppo grande crea aloni, una troppo piccola rende solo meno nitido.", "Gaussian PSF σ {sigma:.2} px: 85 % of the blur measured at the disk edge (σ {m:.2} px). It is a little smaller on purpose: a PSF that is too large creates halos, one that is too small just sharpens less."
             ),
-            None => format!("PSF gaussiana σ {sigma:.2} px: valore tipico per questo tipo di immagine. La sfocatura non si è potuta misurare (serve un disco rotondo con il bordo netto)."),
+            None => tr!("PSF gaussiana σ {sigma:.2} px: valore tipico per questo tipo di immagine. La sfocatura non si è potuta misurare (serve un disco rotondo con il bordo netto).", "Gaussian PSF σ {sigma:.2} px: typical value for this kind of image. The blur could not be measured (a round disk with a sharp edge is needed)."),
         },
     }];
     let structure = deconv_structure(kind, analysis);
     if let (None, Psf::Moffat { fwhm, beta }) = (core, structure.psf) {
-        deconv.push(format!(
-            "PSF di Moffat (FWHM {fwhm:.1} px, β {beta:.1}): il profilo del bordo ha ali più larghe di una gaussiana, tipiche del seeing turbolento; una gaussiana le correggerebbe poco."
+        deconv.push(tr!("PSF di Moffat (FWHM {fwhm:.1} px, β {beta:.1}): il profilo del bordo ha ali più larghe di una gaussiana, tipiche del seeing turbolento; una gaussiana le correggerebbe poco.", "Moffat PSF (FWHM {fwhm:.1} px, β {beta:.1}): the edge profile has wings broader than a Gaussian, typical of turbulent seeing; a Gaussian would correct them poorly."
         ));
     }
     if structure.color == ColorMode::Rgb {
         let [r, g, b] = structure.channel_scale;
-        deconv.push(format!("Una PSF per canale (rosso ×{r:.2}, verde ×{g:.2}, blu ×{b:.2}): la sfocatura misurata sul bordo è diversa nei tre colori."));
+        deconv.push(tr!("Una PSF per canale (rosso ×{r:.2}, verde ×{g:.2}, blu ×{b:.2}): la sfocatura misurata sul bordo è diversa nei tre colori.", "One PSF per channel (red ×{r:.2}, green ×{g:.2}, blue ×{b:.2}): the blur measured at the edge differs between the three colours."));
     }
-    deconv.push("Richardson–Lucy con accelerazione Biggs–Andrews: il metodo di riferimento per le immagini planetarie; raggiunge la stessa qualità con molte meno iterazioni.".into());
-    deconv.push("Arresto automatico: le iterazioni sono un massimo; si ferma quando l'immagine è ricostruita fino al livello del rumore misurato, oltre il quale amplificherebbe solo rumore.".into());
+    deconv.push(tl("Richardson–Lucy con accelerazione Biggs–Andrews: il metodo di riferimento per le immagini planetarie; raggiunge la stessa qualità con molte meno iterazioni.").into());
+    deconv.push(tl("Arresto automatico: le iterazioni sono un massimo; si ferma quando l'immagine è ricostruita fino al livello del rumore misurato, oltre il quale amplificherebbe solo rumore.").into());
     if structure.deringing > 0.0 {
-        deconv.push("Anti-ringing a metà: sul bordo e nel cielo la stima non può allontanarsi troppo dall'immagine osservata, così gli anelli non si formano durante le iterazioni.".into());
+        deconv.push(tl("Anti-ringing a metà: sul bordo e nel cielo la stima non può allontanarsi troppo dall'immagine osservata, così gli anelli non si formano durante le iterazioni.").into());
     }
     deconv.push(match kind {
-        ImageKind::Saturn => format!("Regolarizzazione TV {:.4}, un po' più alta: la divisione di Cassini e i bordi degli anelli creano facilmente aloni.", b.tv_lambda),
-        ImageKind::FullDisk => format!("Regolarizzazione TV {:.4}, bassa: il bordo netto del disco sul cielo nero va trattato con prudenza ma senza appiattire i crateri.", b.tv_lambda),
-        _ => format!("Regolarizzazione TV {:.4}: limita gli aloni sui bordi senza appiattire i dettagli.", b.tv_lambda),
+        ImageKind::Saturn => tr!("Regolarizzazione TV {:.4}, un po' più alta: la divisione di Cassini e i bordi degli anelli creano facilmente aloni.", "TV regularisation {:.4}, a little higher: the Cassini division and the ring edges easily create halos.", b.tv_lambda),
+        ImageKind::FullDisk => tr!("Regolarizzazione TV {:.4}, bassa: il bordo netto del disco sul cielo nero va trattato con prudenza ma senza appiattire i crateri.", "TV regularisation {:.4}, low: the sharp disk edge against the black sky needs care but without flattening the craters.", b.tv_lambda),
+        _ => tr!("Regolarizzazione TV {:.4}: limita gli aloni sui bordi senza appiattire i dettagli.", "TV regularisation {:.4}: limits halos on edges without flattening detail.", b.tv_lambda),
     });
 
     let w = wavelet_structure(kind, analysis, scales);
     let coarsest = w.scale(w.layers.len() - 1);
-    let mut wavelet = vec![format!(
-        "{} livelli: la scala più grossa ({coarsest:.0} px) è circa un decimo della dimensione del soggetto ({:.0} px). Livelli più grandi cambierebbero solo la forma generale di {what}.",
+    let mut wavelet = vec![tr!("{} livelli: la scala più grossa ({coarsest:.0} px) è circa un decimo della dimensione del soggetto ({:.0} px). Livelli più grandi cambierebbero solo la forma generale di {what}.", "{} levels: the coarsest scale ({coarsest:.0} px) is about a tenth of the subject’s size ({:.0} px). Larger levels would only change the overall shape of {what}.",
         w.layers.len(),
         analysis.subject_size
     )];
     if w.scale_mode == ScaleMode::Free {
         let optical = analysis.optics.map(|o| o.cutoff);
         wavelet.push(match (analysis.spectral, optical) {
-            (Some(sp), Some(o)) if o < sp.cutoff => format!(
-                "Primo livello {:.2} px: lo strumento non può risolvere dettagli più fini di un periodo di {:.1} px (limite di diffrazione), anche se lo spettro arriverebbe a {:.1} px: quello che c'è oltre è rumore. Più fine del primo livello c'è solo grana, che viene soltanto ripulita.",
+            (Some(sp), Some(o)) if o < sp.cutoff => tr!("Primo livello {:.2} px: lo strumento non può risolvere dettagli più fini di un periodo di {:.1} px (limite di diffrazione), anche se lo spettro arriverebbe a {:.1} px: quello che c'è oltre è rumore. Più fine del primo livello c'è solo grana, che viene soltanto ripulita.", "First level {:.2} px: the instrument cannot resolve details finer than a period of {:.1} px (diffraction limit), even though the spectrum would reach {:.1} px: whatever lies beyond is noise. Finer than the first level there is only grain, which is merely cleaned.",
                 w.first_scale,
                 1.0 / o,
                 1.0 / sp.cutoff
             ),
-            (Some(sp), _) => format!(
-                "Primo livello {:.2} px: lo spettro dell'immagine mostra che il dettaglio vero finisce intorno a un periodo di {:.1} px, dove il segnale scende sotto il rumore. Il primo livello è centrato lì; quello che è più fine è solo grana e viene soltanto ripulito, mai reso più nitido.",
+            (Some(sp), _) => tr!("Primo livello {:.2} px: lo spettro dell'immagine mostra che il dettaglio vero finisce intorno a un periodo di {:.1} px, dove il segnale scende sotto il rumore. Il primo livello è centrato lì; quello che è più fine è solo grana e viene soltanto ripulito, mai reso più nitido.", "First level {:.2} px: the image's spectrum shows that real detail ends around a period of {:.1} px, where the signal drops below the noise. The first level is centred there; anything finer is only grain and is merely cleaned, never sharpened.",
                 w.first_scale,
                 1.0 / sp.cutoff
             ),
-            (None, Some(o)) => format!("Primo livello {:.2} px, dallo strumento: il limite di diffrazione è un periodo di {:.1} px; lo spettro dell'immagine non si è potuto misurare.", w.first_scale, 1.0 / o),
-            (None, None) => format!("Primo livello {:.2} px, dalla sfocatura (σ {sigma:.1} px): lo spettro dell'immagine non si è potuto misurare.", w.first_scale),
+            (None, Some(o)) => tr!("Primo livello {:.2} px, dallo strumento: il limite di diffrazione è un periodo di {:.1} px; lo spettro dell'immagine non si è potuto misurare.", "First level {:.2} px, from the equipment: the diffraction limit is a period of {:.1} px; the image's spectrum could not be measured.", w.first_scale, 1.0 / o),
+            (None, None) => tr!("Primo livello {:.2} px, dalla sfocatura (σ {sigma:.1} px): lo spettro dell'immagine non si è potuto misurare.", "First level {:.2} px, from the blur (σ {sigma:.1} px): the image's spectrum could not be measured.", w.first_scale),
         });
-        wavelet.push("Scale libere: ogni livello raddoppia la scala del precedente partendo da una dimensione qualsiasi, non per forza da 1 px. Sulle immagini di prova danno un risultato più fedele delle scale classiche 1·2·4·8.".into());
+        wavelet.push(tl("Scale libere: ogni livello raddoppia la scala del precedente partendo da una dimensione qualsiasi, non per forza da 1 px. Sulle immagini di prova danno un risultato più fedele delle scale classiche 1·2·4·8.").into());
     } else {
         wavelet.push(if w.base_step == 2 {
-            format!("Passo iniziale 2 px: l'immagine è sovracampionata (σ {sigma:.1} px), quindi un primo livello da 1 px conterrebbe solo rumore.")
+            tr!("Passo iniziale 2 px: l'immagine è sovracampionata (σ {sigma:.1} px), quindi un primo livello da 1 px conterrebbe solo rumore.", "Initial step 2 px: the image is oversampled (σ {sigma:.1} px), so a first level of 1 px would hold only noise.")
         } else {
-            format!("Passo iniziale 1 px: con una sfocatura di σ {sigma:.1} px il dettaglio più fine arriva quasi al singolo pixel.")
+            tr!("Passo iniziale 1 px: con una sfocatura di σ {sigma:.1} px il dettaglio più fine arriva quasi al singolo pixel.", "Initial step 1 px: with a blur of σ {sigma:.1} px the finest detail reaches almost the single pixel.")
         });
         wavelet.push(match w.kernel {
-            crate::wavelet::WaveletKernel::Linear => "Kernel lineare: l'immagine è sottocampionata (σ < 1 px) e serve una risposta più stretta.".into(),
-            _ => "Kernel B3-spline: liscio e isotropo, non introduce artefatti in nessuna direzione (Starck & Murtagh).".into(),
+            crate::wavelet::WaveletKernel::Linear => tl("Kernel lineare: l'immagine è sottocampionata (σ < 1 px) e serve una risposta più stretta.").into(),
+            _ => tl("Kernel B3-spline: liscio e isotropo, non introduce artefatti in nessuna direzione (Starck & Murtagh).").into(),
         });
-        wavelet.push("Progressione diadica (1·2·4·8…): ogni livello raddoppia la scala, così pochi livelli coprono tutte le dimensioni dei dettagli.".into());
+        wavelet.push(tl("Progressione diadica (1·2·4·8…): ogni livello raddoppia la scala, così pochi livelli coprono tutte le dimensioni dei dettagli.").into());
     }
 
     let mut denoise = vec![match b.noise.method {
-        NoiseMethod::Planetary => "Metodo Pianeti: il rumore è una grana fine sopra dettagli morbidi; toglierlo dalle 3 scale più fini lascia intatte bande e festoni.".to_string(),
-        NoiseMethod::Lunar => "Metodo Luna e Sole: crateri, ombre e granulazione hanno bordi netti; il filtro bilaterale media solo pixel simili e non li ammorbidisce.".to_string(),
+        NoiseMethod::Planetary => tl("Metodo Pianeti: il rumore è una grana fine sopra dettagli morbidi; toglierlo dalle 3 scale più fini lascia intatte bande e festoni.").to_string(),
+        NoiseMethod::Lunar => tl("Metodo Luna e Sole: crateri, ombre e granulazione hanno bordi netti; il filtro bilaterale media solo pixel simili e non li ammorbidisce.").to_string(),
     }];
     denoise.push(match kind {
-        ImageKind::Saturn => "Intensità ridotta: anche le divisioni sottili degli anelli sono dettaglio fine e non vanno cancellate.".into(),
-        ImageKind::Surface => "Pulizia del cielo a zero: in un'immagine di superficie non c'è cielo.".into(),
-        _ => "Pulizia del cielo alta: lo sfondo intorno al soggetto è nero e si può pulire a fondo.".into(),
+        ImageKind::Saturn => tl("Intensità ridotta: anche le divisioni sottili degli anelli sono dettaglio fine e non vanno cancellate.").into(),
+        ImageKind::Surface => tl("Pulizia del cielo a zero: in un'immagine di superficie non c'è cielo.").into(),
+        _ => tl("Pulizia del cielo alta: lo sfondo intorno al soggetto è nero e si può pulire a fondo.").into(),
     });
-    denoise.push(format!("L'intensità tiene conto del rapporto segnale/rumore misurato (SNR {:.0}): più l'immagine è rumorosa, più la pulizia è forte.", analysis.snr));
+    denoise.push(tr!("L'intensità tiene conto del rapporto segnale/rumore misurato (SNR {:.0}): più l'immagine è rumorosa, più la pulizia è forte.", "The strength takes the measured signal-to-noise ratio into account (SNR {:.0}): the noisier the image, the stronger the cleaning.", analysis.snr));
 
-    let bxt = vec![format!(
-        "Diametro PSF {:.1} px: è la FWHM della sfocatura misurata (2,355 × σ). La stima automatica di BlurXTerminator usa le stelle, che in queste immagini non ci sono.",
+    let bxt = vec![tr!("Diametro PSF {:.1} px: è la FWHM della sfocatura misurata (2,355 × σ). La stima automatica di BlurXTerminator usa le stelle, che in queste immagini non ci sono.", "PSF diameter {:.1} px: this is the FWHM of the measured blur (2.355 × σ). BlurXTerminator’s automatic estimate uses stars, which these images do not have.",
         (2.3548 * blur_core(kind, analysis)).clamp(0.5, 8.0)
     )];
     let dering = vec![
-        "Non cerca l'anello da solo: dipingilo con il pennello, largo più o meno quanto l'anello. Sotto la pennellata misura quanto è largo e dove sta, e lo riempie fino al livello di ciò che ha accanto.".into(),
-        "Un bordo netto (il lembo, l'orlo di un cratere), una banda più larga dell'anello e tutto ciò che sta fuori dalla pennellata non vengono toccati.".into(),
+        tl("Non cerca l'anello da solo: dipingilo con il pennello, largo più o meno quanto l'anello. Sotto la pennellata misura quanto è largo e dove sta, e lo riempie fino al livello di ciò che ha accanto.").into(),
+        tl("Un bordo netto (il lembo, l'orlo di un cratere), una banda più larga dell'anello e tutto ciò che sta fuori dalla pennellata non vengono toccati.").into(),
     ];
     Explanation { deconv, wavelet, denoise, bxt, dering }
 }
@@ -748,6 +744,7 @@ mod tests {
             || on(p.curves.enabled, p.curves.params.is_neutral())
             || on(p.color.enabled, p.color.params.is_neutral())
             || on(p.mineral.enabled, p.mineral.params.is_neutral())
+            || on(p.suncolor.enabled, p.suncolor.params.is_neutral())
     }
 
     #[test]

@@ -78,6 +78,31 @@ pub fn distance_km(body: Body, when: &Moment) -> f64 {
     }
 }
 
+/// Geocentric ecliptic position (J2000 ecliptic and equinox, au) of the Sun or a planet at
+/// Julian date `jd`; for a planet, as seen (corrected for the light's travel time).
+pub fn geocentric_au(body: Body, jd: f64) -> Option<[f64; 3]> {
+    let t = |jd: f64| (jd - 2_451_545.0) / 36_525.0;
+    let earth = heliocentric(EARTH, t(jd));
+    if body == Body::Sun {
+        return Some(earth.map(|v| -v));
+    }
+    let el = elements(body)?;
+    let mut delay = 0.0;
+    let mut d = [0.0; 3];
+    for _ in 0..3 {
+        let p = heliocentric(el, t(jd - delay));
+        d = [p[0] - earth[0], p[1] - earth[1], p[2] - earth[2]];
+        delay = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() / 173.144_6;
+    }
+    Some(d)
+}
+
+/// (longitude, latitude, distance): ecliptic spherical coordinates of `v`, radians and `v`'s units.
+pub fn spherical(v: [f64; 3]) -> (f64, f64, f64) {
+    let r = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    (v[1].atan2(v[0]).rem_euclid(std::f64::consts::TAU), (v[2] / r).asin(), r)
+}
+
 fn moon_distance_km(t: f64) -> f64 {
     let d = (297.8501921 + 445_267.1114034 * t).to_radians();
     let m = (357.5291092 + 35_999.0502909 * t).to_radians();

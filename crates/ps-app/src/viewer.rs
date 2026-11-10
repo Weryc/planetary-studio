@@ -1,6 +1,8 @@
 //! Central image canvas: zoom towards the cursor, pan, before/after/split comparison, and
 //! rectangle editing for the ROI, the crop and hand-drawn mask shapes, and mask painting.
 
+use ps_core::i18n::tl;
+use ps_core::tr;
 use crate::theme::{ACCENT, BG, TEXT};
 use crate::worker::Roi;
 use eframe::egui::{
@@ -230,7 +232,6 @@ impl Viewer {
         }
     }
 
-    #[cfg(test)]
     pub fn canvas(&self) -> Rect {
         self.last_canvas
     }
@@ -270,6 +271,11 @@ impl Viewer {
 
     fn to_screen(&self, canvas: Rect, p: Pos2) -> Pos2 {
         self.origin(canvas) + p.to_vec2() * self.zoom
+    }
+
+    /// Where an image point (pixels) is on the screen, as last drawn.
+    pub fn image_to_screen(&self, p: Pos2) -> Pos2 {
+        self.to_screen(self.last_canvas, p)
     }
 
     /// The part of the image on screen (image coordinates).
@@ -567,9 +573,9 @@ impl Viewer {
             // finish editing and go back to moving the view, or edit again.
             if matches!(tool, Tool::Roi | Tool::Pan) && self.drag.is_none() {
                 let (icon, text, tip) = if editing {
-                    (egui_material_icons::icons::ICON_CHECK, "Fatto", "Fine modifica della ROI: torna a spostare la vista")
+                    (egui_material_icons::icons::ICON_CHECK, tl("Fatto"), tl("Fine modifica della ROI: torna a spostare la vista"))
                 } else {
-                    (egui_material_icons::icons::ICON_EDIT, "Modifica ROI", "Sposta o ridimensiona la ROI")
+                    (egui_material_icons::icons::ICON_EDIT, tl("Modifica ROI"), tl("Sposta o ridimensiona la ROI"))
                 };
                 let size = Vec2::new(if editing { 82.0 } else { 124.0 }, 24.0);
                 let mut at = rect.right_bottom() + Vec2::new(-size.x, 8.0);
@@ -621,7 +627,7 @@ impl Viewer {
             }
             painter.rect_stroke(rect, 0.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
             corner_handles(&painter, rect, Color32::WHITE);
-            pill(&painter, rect.left_top() - Vec2::new(0.0, 22.0), &format!("Ritaglio {:.0} × {:.0}", r.width(), r.height()), Color32::WHITE, Color32::BLACK);
+            pill(&painter, rect.left_top() - Vec2::new(0.0, 22.0), &tr!("Ritaglio {:.0} × {:.0}", "Crop {:.0} × {:.0}", r.width(), r.height()), Color32::WHITE, Color32::BLACK);
             output.crop_action = crop_bar(ui, canvas, &mut self.straighten);
         }
 
@@ -652,7 +658,7 @@ impl Viewer {
                 let base = handle + Vec2::new(dir * 2.5, 0.0);
                 painter.add(Shape::convex_polygon(vec![tip, base + Vec2::new(0.0, -4.0), base + Vec2::new(0.0, 4.0)], Color32::WHITE, Stroke::NONE));
             }
-            let (left, right) = if compare == Compare::Ab { ("A · FISSATA", "B · IN MODIFICA") } else { ("PRIMA", "DOPO") };
+            let (left, right) = if compare == Compare::Ab { (tl("A · FISSATA"), tl("B · IN MODIFICA")) } else { (tl("PRIMA"), tl("DOPO")) };
             for (text, x, align) in [(left, split_x - 10.0, egui::Align2::RIGHT_TOP), (right, split_x + 10.0, egui::Align2::LEFT_TOP)] {
                 // Below the view bar floating at the top of the canvas.
                 painter.text(pos2(x, canvas.top() + 56.0), align, text, FontId::proportional(10.0), Color32::from_white_alpha(200));
@@ -661,26 +667,26 @@ impl Viewer {
 
         if compare == Compare::Before {
             // Make it obvious that this is the untouched original (Space held, or "Prima").
-            pill(&painter, egui::pos2(canvas.center().x - 30.0, canvas.top() + 56.0), "PRIMA · originale", Color32::WHITE, Color32::BLACK);
+            pill(&painter, egui::pos2(canvas.center().x - 30.0, canvas.top() + 56.0), tl("PRIMA · originale"), Color32::WHITE, Color32::BLACK);
         }
         if compare == Compare::OnlyA {
-            pill(&painter, egui::pos2(canvas.center().x - 40.0, canvas.top() + 56.0), "A · versione fissata", ACCENT, Color32::BLACK);
+            pill(&painter, egui::pos2(canvas.center().x - 40.0, canvas.top() + 56.0), tl("A · versione fissata"), ACCENT, Color32::BLACK);
         }
         if tool == Tool::Pick {
-            pill(&painter, egui::pos2(canvas.left() + 12.0, canvas.top() + 56.0), "Clicca un punto dell'immagine", ACCENT, Color32::BLACK);
+            pill(&painter, egui::pos2(canvas.left() + 12.0, canvas.top() + 56.0), tl("Clicca un punto dell'immagine"), ACCENT, Color32::BLACK);
         }
         if tool == Tool::Probe {
             if let Some(r) = self.probe {
                 painter.rect_stroke(self.rect_to_screen(canvas, r), 0.0, Stroke::new(1.5, ACCENT), egui::StrokeKind::Middle);
             }
-            pill(&painter, egui::pos2(canvas.left() + 12.0, canvas.top() + 56.0), "Disegna un riquadro attorno a una stella o a una luna · Esc per annullare", ACCENT, Color32::BLACK);
+            pill(&painter, egui::pos2(canvas.left() + 12.0, canvas.top() + 56.0), tl("Disegna un riquadro attorno a una stella o a una luna · Esc per annullare"), ACCENT, Color32::BLACK);
         }
 
         if busy {
             let pill_rect = Rect::from_min_size(canvas.right_top() + Vec2::new(-130.0, 12.0), Vec2::new(118.0, 26.0));
             painter.rect_filled(pill_rect, CornerRadius::same(13), Color32::from_black_alpha(180));
             ui.put(Rect::from_center_size(pill_rect.left_center() + Vec2::new(16.0, 0.0), Vec2::splat(14.0)), egui::Spinner::new().size(14.0).color(ACCENT));
-            painter.text(pill_rect.left_center() + Vec2::new(30.0, 0.0), egui::Align2::LEFT_CENTER, "Elaborazione…", FontId::proportional(12.0), TEXT);
+            painter.text(pill_rect.left_center() + Vec2::new(30.0, 0.0), egui::Align2::LEFT_CENTER, tl("Elaborazione…"), FontId::proportional(12.0), TEXT);
         }
 
         output.hovered = response.hovered();
@@ -737,31 +743,31 @@ fn crop_bar(ui: &mut egui::Ui, canvas: Rect, straighten: &mut f32) -> Option<Cro
     ui.scope_builder(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
         egui::Frame::new().fill(Color32::from_black_alpha(210)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
             let tool = |ui: &mut egui::Ui, icon: egui_material_icons::MaterialIcon, tip: &str| ui.add(egui::Button::new(icon.rich_text().size(18.0)).frame(false)).on_hover_text(tip).clicked();
-            if tool(ui, ICON_ROTATE_LEFT, "Ruota di 90° in senso antiorario") {
+            if tool(ui, ICON_ROTATE_LEFT, tl("Ruota di 90° in senso antiorario")) {
                 action = Some(CropAction::Rotate(-1));
             }
-            if tool(ui, ICON_ROTATE_RIGHT, "Ruota di 90° in senso orario") {
+            if tool(ui, ICON_ROTATE_RIGHT, tl("Ruota di 90° in senso orario")) {
                 action = Some(CropAction::Rotate(1));
             }
-            if tool(ui, ICON_SWAP_HORIZ, "Specchia orizzontalmente") {
+            if tool(ui, ICON_SWAP_HORIZ, tl("Specchia orizzontalmente")) {
                 action = Some(CropAction::Flip { horizontal: true });
             }
-            if tool(ui, ICON_SWAP_VERT, "Specchia verticalmente") {
+            if tool(ui, ICON_SWAP_VERT, tl("Specchia verticalmente")) {
                 action = Some(CropAction::Flip { horizontal: false });
             }
             ui.add(egui::Separator::default().vertical());
-            ui.label(ICON_STRAIGHTEN.rich_text().size(16.0)).on_hover_text("Raddrizza");
+            ui.label(ICON_STRAIGHTEN.rich_text().size(16.0)).on_hover_text(tl("Raddrizza"));
             ui.spacing_mut().slider_width = 130.0;
             let slider = ui.add(egui::Slider::new(straighten, -45.0..=45.0).fixed_decimals(1).suffix("°"));
             if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                 action = Some(CropAction::Straighten(*straighten));
             }
             ui.add(egui::Separator::default().vertical());
-            if ui.add(egui::Button::new("Annulla").min_size(Vec2::new(80.0, 26.0))).on_hover_text("Esc").clicked() {
+            if ui.add(egui::Button::new(tl("Annulla")).min_size(Vec2::new(80.0, 26.0))).on_hover_text("Esc").clicked() {
                 action = Some(CropAction::Cancel);
             }
-            let apply = egui::Button::new(egui::RichText::new("Applica ritaglio").color(Color32::BLACK).strong()).fill(ACCENT).min_size(Vec2::new(130.0, 26.0));
-            if ui.add(apply).on_hover_text("Invio").clicked() {
+            let apply = egui::Button::new(egui::RichText::new(tl("Applica ritaglio")).color(Color32::BLACK).strong()).fill(ACCENT).min_size(Vec2::new(130.0, 26.0));
+            if ui.add(apply).on_hover_text(tl("Invio")).clicked() {
                 action = Some(CropAction::Apply);
             }
         });

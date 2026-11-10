@@ -1,6 +1,7 @@
 //! Small custom widgets that give the app its look: switches, segmented controls,
 //! labelled sliders with reset, and the histogram.
 
+use ps_core::tr;
 use crate::theme::{self, ACCENT, BG, BORDER, SURFACE_HOVER, TEXT, TEXT_WEAK};
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Response, RichText, Sense, Stroke, Ui, Vec2, emath};
 use egui_material_icons::MaterialIcon;
@@ -69,7 +70,15 @@ pub fn icon_button(ui: &mut Ui, icon: MaterialIcon, tooltip: &str) -> Response {
 /// Frameless toolbar button: icon and label, in the accent colour while its mode is on.
 pub fn tool_button(ui: &mut Ui, icon: MaterialIcon, label: &str, on: bool) -> Response {
     let colour = if on { ACCENT } else { TEXT };
-    ui.add(egui::Button::new((icon.rich_text().size(theme::size::ICON).color(colour), RichText::new(label).size(theme::size::BODY).color(colour))).frame(false))
+    // A framed button: it lights up under the pointer, like the menus beside it.
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+        w.inactive.bg_stroke = Stroke::NONE;
+        w.hovered.bg_stroke = Stroke::NONE;
+        ui.add(egui::Button::new((icon.rich_text().size(theme::size::ICON).color(colour), RichText::new(label).size(theme::size::BODY).color(colour))).frame(true)).on_hover_cursor(egui::CursorIcon::PointingHand)
+    })
+    .inner
 }
 
 /// One row: label, slider, editable value and a reset button, shown when the value differs
@@ -149,7 +158,7 @@ impl<'a, N: emath::Numeric> ParamSlider<'a, N> {
                 let icon = egui_material_icons::icons::ICON_RESTART_ALT;
                 let color = if response.hovered() { ACCENT } else { TEXT_WEAK };
                 ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon.codepoint, egui::FontId::new(14.0, icon.font_family()), color);
-                if response.on_hover_text(format!("Ripristina ({})", fmt_default(self.default.to_f64(), self.decimals))).clicked() {
+                if response.on_hover_text(tr!("Ripristina ({})", "Reset ({})", fmt_default(self.default.to_f64(), self.decimals))).clicked() {
                     *self.value = self.default;
                     changed = true;
                 }
@@ -302,9 +311,9 @@ impl Histogram {
         let (black, white) = self.clipped();
         let label = |frac: f32| if frac >= 0.001 { format!("{:.1} %", frac * 100.0) } else { "0 %".into() };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("neri pieni {}", label(black))).size(theme::size::SMALL).color(TEXT_WEAK));
+            ui.label(RichText::new(tr!("neri pieni {}", "solid blacks {}", label(black))).size(theme::size::SMALL).color(TEXT_WEAK));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(format!("bianchi pieni {}", label(white))).size(theme::size::SMALL).color(TEXT_WEAK));
+                ui.label(RichText::new(tr!("bianchi pieni {}", "solid whites {}", label(white))).size(theme::size::SMALL).color(TEXT_WEAK));
             });
         });
     }
