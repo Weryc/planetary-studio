@@ -275,7 +275,27 @@ pub fn smart_structure(kind: ImageKind, analysis: &Analysis) -> crate::smart::Sm
     };
     // A surface has no sky: its dark parts are shadows, part of the subject.
     let include_sky = kind == ImageKind::Surface;
-    crate::smart::SmartParams { cutoff: detail_cutoff(analysis).unwrap_or(0.0), peak, limb_protection, include_sky, ..Default::default() }
+    // The shape the learned model picks for this image, when it has an answer.
+    use crate::smart::SmartCurve;
+    let (learned_strength, learned) = crate::learned::smart_curve(analysis).unwrap_or_default();
+    let curve = if crate::learned::IN_USE && !learned.is_empty() { SmartCurve::Learned } else { SmartCurve::Standard };
+    let color = if curve == SmartCurve::Learned { learned_colour(analysis) } else { crate::color::ColorMode::Luminance };
+    let learned_nights = crate::learned::nights(analysis);
+    crate::smart::SmartParams { cutoff: detail_cutoff(analysis).unwrap_or(0.0), peak, limb_protection, include_sky, curve, learned, learned_strength, learned_nights, color, ..Default::default() }
+}
+
+/// Highest strength the automatic sharpening takes from the learned model.
+pub const LEARNED_CAP: f32 = 1.2;
+
+/// How the learned curve treats colour: R, G and B each on a colour planet (its colour detail is
+/// blurred by the seeing as much as its brightness: on luminance alone the colours stay soft),
+/// luminance only on surfaces and full disks (their colour is mostly noise: per channel it
+/// fringes).
+pub fn learned_colour(analysis: &Analysis) -> crate::color::ColorMode {
+    match analysis.kind {
+        ImageKind::Planet | ImageKind::Saturn if analysis.colour => crate::color::ColorMode::Rgb,
+        _ => crate::color::ColorMode::Luminance,
+    }
 }
 
 /// The automatic "Nitidezza intelligente": the structure with a strength by kind and by how
@@ -291,7 +311,14 @@ pub fn auto_smart(kind: ImageKind, analysis: &Analysis, strength: AutoStrength) 
         AutoStrength::Normal => 1.0,
         AutoStrength::Strong => 1.4,
     };
-    crate::smart::SmartParams { strength: (base * factor).min(1.0), ..smart_structure(kind, analysis) }
+    let structure = smart_structure(kind, analysis);
+    // With the learned shape, its own height, up to a little past BlurXTerminator's: the model
+    // can ask for much more, which on real stacks can leave grain (the slider goes further).
+    let (base, cap) = match structure.curve {
+        crate::smart::SmartCurve::Learned => (structure.learned_strength, LEARNED_CAP),
+        _ => (base, 1.0),
+    };
+    crate::smart::SmartParams { strength: (base * factor).min(cap), ..structure }
 }
 
 /// The automatic deconvolution: [`deconv_structure`] with as many iterations at most as
@@ -416,6 +443,7 @@ fn nothing_applied(p: Pipeline) -> Pipeline {
         tone: Module::on(ToneParams::default()),
         curves: Module::on(ToneParams::default()),
         color: Module::on(ColorParams::default()),
+        photocolor: Module::off(crate::photocolor::PhotoColorParams::neutral()),
         mineral: Module::on(crate::adjust::MineralParams::neutral()),
         suncolor: Module::on(crate::suncolor::SunColorParams::neutral()),
         layers: p.layers,
@@ -611,6 +639,11 @@ fn with_structure(current: &Pipeline, structure: &Pipeline) -> Pipeline {
     p.bxt.params.psf_diameter = structure.bxt.params.psf_diameter;
     let (m, s) = (&mut p.smart.params, &structure.smart.params);
     (m.cutoff, m.peak, m.limb_protection, m.include_sky) = (s.cutoff, s.peak, s.limb_protection, s.include_sky);
+    // What the learned models answer for this image (the chosen curve stays the user's).
+    (m.learned, m.learned_strength, m.learned_nights) = (s.learned.clone(), s.learned_strength, s.learned_nights.clone());
+    if m.night.is_some_and(|n| !m.learned_nights.iter().any(|q| q.0 == n)) {
+        m.night = None;
+    }
     p.align.params = structure.align.params;
     let (own, d) = (&mut p.dering.params, &structure.dering.params);
     (own.radius, own.edges, own.region) = (d.radius, d.edges, d.region);
@@ -638,6 +671,8 @@ mod tests {
             power: Vec::new(),
             optics: None,
             planet: None,
+            colour: false,
+            bands: None,
         }
     }
 
@@ -743,6 +778,7 @@ mod tests {
             || on(p.tone.enabled, p.tone.params.is_neutral())
             || on(p.curves.enabled, p.curves.params.is_neutral())
             || on(p.color.enabled, p.color.params.is_neutral())
+            || on(p.photocolor.enabled, p.photocolor.params.is_neutral())
             || on(p.mineral.enabled, p.mineral.params.is_neutral())
             || on(p.suncolor.enabled, p.suncolor.params.is_neutral())
     }

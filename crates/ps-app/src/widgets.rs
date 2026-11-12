@@ -30,7 +30,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
     let mut changed = false;
     egui::Frame::new()
         .fill(BG)
-        .corner_radius(CornerRadius::same(7))
+        .corner_radius(CornerRadius::same(theme::radius::L))
         .inner_margin(egui::Margin::same(2))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -45,13 +45,13 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
                     let color = if selected { ACCENT } else { TEXT_WEAK };
                     let text = RichText::new(label).color(color);
                     let button = match icon {
-                        Some(icon) => egui::Button::new((icon.rich_text().color(color).size(15.0), text)),
+                        Some(icon) => egui::Button::new((icon.rich_text().color(color).size(theme::size::ICON_SMALL), text)),
                         None => egui::Button::new(text),
                     };
                     let button = button
                         .fill(if selected { SURFACE_HOVER } else { Color32::TRANSPARENT })
                         .stroke(Stroke::NONE)
-                        .corner_radius(CornerRadius::same(5));
+                        .corner_radius(CornerRadius::same(theme::radius::M));
                     if ui.add(button).clicked() && !selected {
                         *value = option;
                         changed = true;
@@ -64,7 +64,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
 
 /// Frameless icon button with tooltip.
 pub fn icon_button(ui: &mut Ui, icon: MaterialIcon, tooltip: &str) -> Response {
-    ui.add(egui::Button::new(icon.rich_text().size(17.0)).frame(false)).on_hover_text(tooltip)
+    ui.add(egui::Button::new(icon.rich_text().size(theme::size::ICON)).frame(false)).on_hover_text(tooltip)
 }
 
 /// Frameless toolbar button: icon and label, in the accent colour while its mode is on.
@@ -79,6 +79,43 @@ pub fn tool_button(ui: &mut Ui, icon: MaterialIcon, label: &str, on: bool) -> Re
         ui.add(egui::Button::new((icon.rich_text().size(theme::size::ICON).color(colour), RichText::new(label).size(theme::size::BODY).color(colour))).frame(true)).on_hover_cursor(egui::CursorIcon::PointingHand)
     })
     .inner
+}
+
+/// A floating window with the look every window of the app shares: bold title, panel fill with
+/// a border, resizable, never collapsed to its title bar.
+pub fn window<'a>(ctx: &egui::Context, title: &str) -> egui::Window<'a> {
+    egui::Window::new(RichText::new(title).strong())
+        .collapsible(false)
+        .resizable(true)
+        .frame(egui::Frame::window(&ctx.global_style()).fill(theme::PANEL).stroke(Stroke::new(1.0, BORDER)))
+}
+
+/// Frame radius of buttons that stand alone (primary actions, switch rows).
+const BUTTON_RADIUS: u8 = theme::radius::L;
+
+/// The one button of a view that carries out its main action: accent fill, dark text.
+pub fn primary_button(icon: Option<MaterialIcon>, text: &str) -> egui::Button<'static> {
+    let label = RichText::new(text).color(Color32::BLACK).strong();
+    let button = match icon {
+        Some(icon) => egui::Button::new((icon.rich_text().color(Color32::BLACK), label)),
+        None => egui::Button::new(label),
+    };
+    button.fill(ACCENT).corner_radius(CornerRadius::same(BUTTON_RADIUS))
+}
+
+/// Text of a section heading in capitals ("AVANZATE", "OGGETTO"…).
+pub fn caps(text: &str) -> RichText {
+    RichText::new(text).size(theme::size::SMALL).strong().extra_letter_spacing(0.8).color(TEXT_WEAK)
+}
+
+/// Text of the title of a group of controls inside a card ("Curva", "Livelli"…).
+pub fn subheading(text: impl Into<String>) -> RichText {
+    RichText::new(text).size(theme::size::SMALL).strong().color(TEXT_WEAK)
+}
+
+/// A grey note, wrapped and shown in full (`panels::hint` keeps only the first sentence).
+pub fn note(ui: &mut Ui, text: &str) -> Response {
+    ui.add(egui::Label::new(RichText::new(text).size(theme::size::SMALL).color(TEXT_WEAK)).wrap())
 }
 
 /// One row: label, slider, editable value and a reset button, shown when the value differs

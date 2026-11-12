@@ -22,6 +22,7 @@ use crate::deconv::{DeconvParams, DeconvReport, PlaneOptions, deconvolve_plane_w
 use crate::dering::{self, DeringParams};
 use crate::enhance::{self, ContrastParams, NoiseParams, ToneParams};
 use crate::mask::MaskSpec;
+use crate::photocolor::PhotoColorParams;
 use crate::psf::Psf;
 use crate::smart::SmartParams;
 use crate::suncolor::SunColorParams;
@@ -122,6 +123,8 @@ pub struct Pipeline {
     pub tone: Module<ToneParams>,
     /// Curves, applied after the levels (the steps' levels stay neutral).
     pub curves: Module<ToneParams>,
+    /// Jupiter's band colours carried onto a NASA map's (only when the subject is Jupiter).
+    pub photocolor: Module<PhotoColorParams>,
     pub color: Module<ColorParams>,
     pub layers: Vec<Layer>,
     pub mineral: Module<MineralParams>,
@@ -142,6 +145,7 @@ impl Default for Pipeline {
             dering: Module::off(DeringParams::default()),
             tone: Module::on(ToneParams::default()),
             curves: Module::on(ToneParams::default()),
+            photocolor: Module::off(PhotoColorParams::default()),
             color: Module::on(ColorParams::default()),
             layers: Vec::new(),
             mineral: Module::off(MineralParams::default()),
@@ -240,6 +244,8 @@ pub enum Stage {
     /// Levels (the name predates the split from the curves; kept for saved preferences).
     Tone,
     Curves,
+    /// Jupiter's colours from a NASA map, before the general colour controls.
+    PhotoColor,
     Color,
     Layers,
     Mineral,
@@ -252,7 +258,7 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in processing order.
-    pub const ALL: [Stage; 16] = [
+    pub const ALL: [Stage; 17] = [
         Stage::Align,
         Stage::Bxt,
         Stage::Deconv,
@@ -263,6 +269,7 @@ impl Stage {
         Stage::Dering,
         Stage::Tone,
         Stage::Curves,
+        Stage::PhotoColor,
         Stage::Color,
         Stage::Layers,
         Stage::Rings,
@@ -283,6 +290,7 @@ impl Stage {
             Stage::Dering => "Dering",
             Stage::Tone => tl("Livelli tonali"),
             Stage::Curves => tl("Curve"),
+            Stage::PhotoColor => tl("Colore fotometrico"),
             Stage::Color => tl("Colore"),
             Stage::Layers => tl("Maschere"),
             Stage::Mineral => "Mineral Moon",
@@ -305,6 +313,27 @@ pub struct Aux<'a> {
     pub ringing_map: bool,
     /// Also return this map of the smart sharpening, computed on the image entering it.
     pub smart_view: crate::smart::SmartView,
+    /// Text and marks laid over the finished image (premultiplied red, green, blue and coverage
+    /// planes, each with a generation).
+    pub overlay: Option<OverlayPlanes>,
+}
+
+/// Premultiplied red, green, blue and coverage planes of a layer of marks, at the image's size.
+pub type OverlayPlanes = [(Arc<Vec<f32>>, u64); 4];
+
+/// `img` with the marks laid over it: `out = img · (1 − coverage) + colour`.
+pub fn apply_overlay(img: &Image, o: &OverlayPlanes) -> Image {
+    let mut out = img.clone();
+    let mono = out.is_mono();
+    let a = &o[3].0;
+    let n = a.len();
+    for (c, ch) in out.channels_mut().iter_mut().enumerate() {
+        for (i, v) in ch.iter_mut().enumerate().take(n) {
+            let p = if mono { (o[0].0[i] + o[1].0[i] + o[2].0[i]) / 3.0 } else { o[c.min(2)].0[i] };
+            *v = *v * (1.0 - a[i]) + p;
+        }
+    }
+    out
 }
 
 /// Whether the pipeline uses deconvolution's anti-ringing area.
@@ -456,6 +485,7 @@ pub struct Processor {
     dering: Option<Slot<(DeringParams, u64)>>,
     tone: Option<Slot<ToneParams>>,
     color: Option<Slot<ColorParams>>,
+    photocolor: Option<Slot<PhotoColorParams>>,
     layers: HashMap<u64, Option<Slot<LayerKey>>>,
     blend: Option<Slot<Vec<(u64, u64)>>>,
     mineral: Option<Slot<(MineralParams, u64)>>,
@@ -640,6 +670,14 @@ impl Processor {
             stage!(Stage::Tone, self.tone, t.clone(), |img: &Image| Some(enhance::tone(img, t)));
         }
 
+        if p.photocolor.enabled && colour && !p.photocolor.params.is_neutral() {
+            let params = p.photocolor.params.clone();
+            match crate::photocolor::analyse(&frame.0, &params) {
+                Some(fit) => stage!(Stage::PhotoColor, self.photocolor, params.clone(), |img: &Image| Some(crate::photocolor::apply_fit(img, &fit, params.strength))),
+                None => warnings.push((Stage::PhotoColor, tl("non trovo Giove con le sue fasce: lascio i colori com'erano").to_string())),
+            }
+        }
+
         let base_color = Some(p.color.params.clone()).filter(|c| p.color.enabled && colour && !c.is_neutral());
         if let Some(c) = &base_color {
             stage!(Stage::Color, self.color, c.clone(), |img: &Image| Some(apply_color(img, c)));
@@ -744,6 +782,10 @@ impl Processor {
                 }
             };
         }
+        // The names and marks go on last, over everything.
+        if let Some(o) = aux.overlay.as_ref().filter(|o| o[3].0.len() == frame.0.width() * frame.0.height()) {
+            frame = (Arc::new(apply_overlay(&frame.0, o)), next_generation());
+        }
         if self.memory_saving {
             self.drop_quick_stages();
         }
@@ -765,6 +807,7 @@ impl Processor {
         self.ring = None;
         self.tone = None;
         self.color = None;
+        self.photocolor = None;
         self.blend = None;
         self.mineral = None;
         self.suncolor = None;
@@ -928,6 +971,25 @@ mod tests {
         assert!(cached(Stage::Deconv) && cached(Stage::Wavelet) && !cached(Stage::Color));
     }
 
+    /// The photometric colour stage runs before the general colour, is cached by its settings, and
+    /// warns (leaving the picture alone) when there is no Jupiter to be found.
+    #[test]
+    fn photometric_colour_runs_and_warns() {
+        let mut proc = Processor::default();
+        let (src, g) = (image(), next_generation());
+        let mut p = Pipeline::default();
+        p.deconv.enabled = false;
+        p.photocolor = Module::on(PhotoColorParams::default());
+        let out = run(&mut proc, &src, g, &p, &Aux::default());
+        // `image()` is no Jupiter: nothing found, a warning, the colours as they were.
+        assert!(out.warnings.iter().any(|(s, _)| *s == Stage::PhotoColor), "{:?}", out.warnings);
+        assert!(out.timings.iter().all(|t| t.stage != Stage::PhotoColor));
+        // Off, no trace of it.
+        p.photocolor.enabled = false;
+        let out = run(&mut proc, &src, g, &p, &Aux::default());
+        assert!(out.warnings.iter().all(|(s, _)| *s != Stage::PhotoColor));
+    }
+
     #[test]
     fn memory_saving_keeps_the_expensive_stages() {
         let mut proc = Processor { memory_saving: true, ..Default::default() };
@@ -999,5 +1061,16 @@ mod tests {
         let out = run(&mut proc, &image(), next_generation(), &p, &Aux::default());
         assert_eq!(out.warnings.len(), 1);
         assert_eq!(out.warnings[0].0, Stage::Bxt);
+    }
+
+    #[test]
+    fn overlay_replaces_covered_pixels_and_keeps_the_rest() {
+        let img = Image::new(2, 1, vec![vec![0.5, 0.5]; 3], 8);
+        let plane = |v: Vec<f32>| (Arc::new(v), 1);
+        // Pixel 0: fully covered by pure red; pixel 1: untouched.
+        let o = [plane(vec![1.0, 0.0]), plane(vec![0.0, 0.0]), plane(vec![0.0, 0.0]), plane(vec![1.0, 0.0])];
+        let out = apply_overlay(&img, &o);
+        assert_eq!([out.channels()[0][0], out.channels()[1][0], out.channels()[2][0]], [1.0, 0.0, 0.0]);
+        assert_eq!(out.channels()[1][1], 0.5);
     }
 }

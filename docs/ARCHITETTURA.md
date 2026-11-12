@@ -961,6 +961,176 @@ L'interfaccia esiste in italiano e in inglese; si cambia da Impostazioni › LIN
 
 **Controlli**: `english_interface_has_no_italian_left` apre ogni scheda con tutte le carte aperte, in inglese, e cerca parole italiane in ogni etichetta; `tab_names_are_translated_but_the_saved_key_is_not`, `i18n::tests::*`. Il test di snapshot accetta `PS_SNAPSHOT_EN=1` per produrre le immagini in inglese. Per aggiungere un testo: scrivilo in italiano dentro `tl(...)` e aggiungi la riga in `i18n_en.rs` (il test del dizionario segnala duplicati).
 
+### Colore fotometrico di Giove (2026-11-12, `ps-core/src/photocolor.rs`)
+
+- **Idea.** Analogo planetario della calibrazione fotometrica con le stelle: il colore di Giove *per latitudine* è
+  un'impronta stabile (le bande sono uguali a ogni longitudine). Da mappe globali NASA sono state ricavate, con
+  `ps-io --example jupiter_profile` (TIFF) e `jupiter_profile_rgb` (FITS calibrati), 48 mediane RGB per fascia di
+  2,5° di latitudine planetocentrica (−60°…+60°, mediana lungo la longitudine: robusta a Macchia Rossa e ovali) più
+  il colore della Macchia Rossa (la zona compatta più rossa tra 14° e 32° S). Tre riferimenti in
+  `photocolor_data.rs` (pochi KB; le mappe non sono nel programma, crediti in THIRD_PARTY.md): `Cassini 2000`
+  (predefinito, PIA07782, vivace, vicino all'occhio), `Hubble 2019` (OPAL ciclo 26, F631N/F547M/F467M × fattori I/F
+  del README) e `Hubble 2021` (ciclo 28, F631N/F502N/F467M; **i fattori I/F cambiano da ciclo a ciclo**: 0,00357,
+  0,00357, 0,00346). L'anteprima colore di OPAL mette F395N (395 nm, quasi UV, dove Giove è scuro) nel blu: da qui
+  il giallo della prima versione (B/R 0,53 nella zona equatoriale contro 1,02 di Cassini); rimossa. Le tabelle sono
+  codificate sRGB a esposizione da foto.
+- **Misura.** Forma del pianeta da `identify::planet_shape` (momenti della regione luminosa); striscia centrale
+  (|a| < 0,5 del semiasse maggiore, dentro 0,92 del disco). **Latitudine con l'inclinazione B**: su una sfera di raggio
+  unitario `y = sinφ·cosB − z·sinB`, quindi `sinφ = (y + z·sinB)/cosB`, poi planetocentrica con
+  `tan φc = (1−f) tan β`. B (latitudine planetocentrica della Terra visto da Giove, ±3,5°) viene da
+  `moons::jupiter_tilt` (Meeus cap. 43) e l'app la mette in `PhotoColorParams.tilt` dall'ora della ripresa (file,
+  log o scelta in Identifica) in `processed_pipeline`, non nella pipeline dell'utente. Mediana per fascia, ≥ 40 pixel,
+  cielo (5° percentile) tolto. Nord/sud non noti: due letture (`north_at_plus_b`), vince la distanza minore.
+- **Macchia Rossa.** Cercata nella fascia 16°–30° S (|a| < 0,75): indice di rossore (R−B)/Y sfocato, picco ≥ 0,10 sopra
+  la mediana, macchia connessa al 60 %, area 0,15–4 % del disco e *tondeggiante* (non lunga e sottile: una cintura
+  rossa non vale), colore = mediana. Entra nell'adattamento come riga con peso triplo, e aiuta a distinguere gli
+  emisferi.
+- **Adattamento in due passi, in luce lineare** (gamma 2,2 per foto e mappe, quindi indipendente dallo stiramento).
+  Colori normalizzati alla luminanza (u = p/Y → v = r/Y). 1) Bilanciamento del bianco: guadagni diagonali ai minimi
+  quadrati sulle bande *neutre* (peso √n × (1 − c/(1,2·c_med)), c = distanza dal grigio della banda di riferimento);
+  2) matrice 3×3 sui colori già bilanciati, peso √n × (0,4 + c/c_med limitato a 2) più la Macchia, tirata verso
+  l'identità (ridge 0,35). Matrice finale = M₂·diag(g). Applicazione in lineare: `M·(c − cielo)`, luminanza
+  dell'originale rimessa, ricodifica; `Intensità` (1 di default quando si accende) mescola con l'originale.
+  Costo 40–90 ms.
+- **Pipeline.** `Stage::PhotoColor` tra Curve e Colore, spenta di default; se non trova il pianeta con le fasce lascia
+  l'immagine com'era e segnala un avviso. Carta nella scheda Colore solo per un'immagine a colori di tipo Pianeta il
+  cui soggetto è Giove (`Preferences::subject`, non salvato). Nomi salvati dalle prime versioni
+  (`HubbleNatural2019`) ancora letti (alias serde).
+- **Prove.** Sintetiche (cast di colore, inclinazione, Macchia che decide l'emisfero) e sulle Giove vere in
+  `Immagini_test/grezze` e `elaborate`: distanze nette in calo, risultati plausibili; i riferimenti Hubble lasciano le
+  foto quasi neutre, Cassini le scalda. JunoCam scartata (bilanciamento arbitrario).
+- **Limiti noti.** Saturno e Marte non fatti (Saturno: gli anelli coprono il globo, serve prima l'ellisse del globo
+  senza anelli; mappe OPAL 2019 di Saturno esistono); il gamma 2,2 è un'ipotesi per tutte le foto; il riferimento
+  Cassini è già «abbellito»; la Macchia può non vedersi o stare al limbo.
+
+### Nitidezza appresa (fasi 1 e 2, 12 novembre 2026)
+
+Un piccolo modello sceglie la curva della «Nitidezza intelligente» dall'analisi; decide solo le impostazioni, i
+pixel restano delle wavelet (`ps-core/src/learned.rs`, pesi generati in `learned_data.rs`).
+
+- **Ingressi.** 26 numeri presi solo dall'analisi (`learned::features`): taglio, pendenza e σ dello spettro,
+  sfocatura del rumore, S/R a 0,5–2× il taglio, forma dello spettro misurato, elementi di risoluzione nel
+  soggetto, colore, tipo, pianeta suggerito dai pixel. Niente dal nome del file, così app e addestramento vedono
+  gli stessi numeri (per questo `Analysis` ha ora il campo `colour`).
+- **Uscita.** ln(guadagno) su 12 punti in multipli del taglio (`learned::GRID`), limitato a 0‥3,4; convertito
+  in forza (picco: 1 = ×12) e tabella di forma come le curve fisse (`learned::to_smart`). `SmartCurve::Learned`
+  usa quella tabella (`SmartParams::learned`, `learned_strength`). Fuori dall'intervallo visto in addestramento
+  (z oltre ±1 dai limiti) nessuna risposta e resta la curva fissa.
+- **Dati** (`ps-io/examples/ml_dataset.rs`, comune in `ml_common`). Per ogni grezza: guadagno di BXT dentro il
+  soggetto (maestro); 9 esempi sintetici: verità = stack ridotto 2–4× fino a sfocatura propria ≈0,6 px, sfocato a
+  1,3/1,9/2,6 px totali e con rumore correlato 0,7/1,5/3× quello dello stack; risposta = Wiener verso il segnale
+  della verità. 79 immagini, 542 esempi, 24 gruppi (serata/telescopio/autore).
+- **Addestramento** (`ml_train.rs`): verifica escludendo un gruppo alla volta. Scelto lineare (ridge λ=100) sulla
+  verità: errore 0,32 in ln contro 0,78 della curva fissa automatica; addestrato su BXT è vicino a BXT ma lontano
+  dalla verità (1,2). BXT stesso dista 1,5 dalla verità: spinge ~7× oltre (picco mediano ×17 contro ×2,3).
+- **Prova sulle immagini** (`ml_eval.rs`, errore RMS dentro il soggetto / errore senza nitidezza, mediane):
+  curva fissa 1,45, modello 0,60, modello ×1,5 0,64, ×2,5 0,95, curva ideale nota la verità 0,53, BXT 3,99. Sui
+  171 esempi con verità davvero nitida: fissa 1,02, modello 0,66, BXT 1,02. Il modello vince nel 95 % dei casi;
+  la sua forza mediana è 0,16 contro 0,35.
+- **Limiti.** Il modello è fedele, non incisivo: la verità da stack resta un po' morbida e l'errore quadratico
+  premia la prudenza. Esempi sbilanciati (Saturno 45 %). Per questo `learned::IN_USE = false`: l'automatico resta
+  Standard al 35 %, la curva appresa si sceglie nel menu Curva (porta la sua forza). I TIFF float a 32 bit di
+  ImageJ non si aprono con `ps_io::load` (letti a parte in `ml_common::load_any`).
+
+### Nitidezza appresa, prova 2: riferimenti nitidi (12 novembre 2026)
+
+Nella prova 1 la verità (stack ridotto) restava morbida e il modello imparava a non superarla. Qui la verità è
+un'immagine finita e nitida (`Immagini_test/riferimenti`, crediti nel suo CREDITS.md): Giove e Saturno di Hubble,
+mosaico Cassini PIA06193, Marte di Hubble, Luna ricostruita dalla NASA (SVS 5187, LRO/LOLA, con il terminatore),
+Sole SDO (AIA 304, HMI). `ml_ref.rs`: riferimento linearizzato (γ 2,2), ridotto con Mitchell alle dimensioni
+amatoriali (Giove 300/450/650 px, Saturno 450/650/900, Marte 150/250/350; Luna e Sole: disco a 1000 px e le
+zone 512² con più dettaglio a 0,7 e 0,5), una verità su due in mono; seeing gaussiano 1,2/2,0/2,8 px o Moffat
+FWHM 4,5 β 2,8 (miscela di gaussiane di `Psf::gaussian_mixture`), rumore correlato 0,6 px a S/R 150/450/1300,
+fondo 0,01. Le degradate si rigenerano identiche (`ml_common::degrade`); si salvano solo le verità (PNG 16 bit).
+
+- **Dati.** 18 riferimenti, 684 esempi, 17 gruppi (stessa ripresa = un gruppo). Scelto ridge λ=1 sulla verità
+  (`learned_data_ref.rs`): errore curva 0,51 contro 0,82 della fissa; BXT dista 0,80 dalla verità (1,50 nella prova 1).
+- **Curve mediane.** Verità ×10,6 al taglio, BXT ×12,2, modello ×9,3, fissa ×4,9. Oltre 1,3× il taglio la verità
+  scende sotto ×1 (solo grana), BXT resta ×4–7.
+- **Prova sulle immagini** (`ml_eval_ref.rs`, mediane, 1 = nessuna nitidezza): fissa 0,73, modello 0,66, ×1,5
+  0,67, ×2,5 0,72, curva ideale 0,61, BXT 0,64 (sui suoi 57 casi: modello 0,67, BXT 0,64). Superfici quasi ferme
+  (0,82 contro 0,83). Il modello batte la fissa nel 74 %.
+- **Riprese vere** (`ml_check.rs`): il modello dai riferimenti risponde su 73 di 86 (quello dagli stack su 21: le
+  riprese vere escono dal suo intervallo), forza mediana 98 %, 24 al massimo 190 % (Saturni MPD: bene; Luna: più
+  grana di BXT).
+- **Nell'app (allora).** Due modelli, «Appresa dagli stack» e «Appresa dai riferimenti». Dal gruppo 1 (sotto) ne
+  resta uno solo; il modello della prova 1 è in `target/ml/learned_data.rs`, i suoi strumenti (`ml_dataset.rs`,
+  `ml_eval.rs`) in `target/ml/strumenti_prova1/`.
+
+### Nitidezza appresa, gruppo 1: seeing a fotogrammi, diagnosi, spiegazione (12 novembre 2026)
+
+- **Diagnosi «slavata»** (`ps-io/examples/ml_diag.rs`, dati in `target/ml_diag/diag.tsv`, 70 grezze con BXT in
+  cache). Guadagno dentro il soggetto rispetto allo stack, mediane, a 0,06/0,1/0,25/0,5/1× il taglio: BXT
+  1,33/1,34/2,09/4,79/17; noi (curva dai riferimenti) 1,02/1,02/1,45/3,04/9. Sul dettaglio del colore (piani R−L,
+  B−L) BXT 1,29/1,30/1,88/3,58; noi in luminanza 1,02/1,02/1,12/1,29. Due cause: (1) l'alone del seeing toglie
+  contrasto anche alle strutture grandi (bande) e noi non le rinforzavamo (curva da 0,25× il taglio, seeing
+  simulato gaussiano senza ali larghe); (2) in modalità luminanza il dettaglio del colore resta quello dello stack
+  (e schiarendo si aggiunge lo stesso valore a R, G, B). Media e saturazione globale non cambiano in nessuna delle
+  tre: non è una curva di toni.
+- **Seeing a fotogrammi** (`ps-io/examples/ml_common/seeing.rs`, controllo in `ml_seeing.rs`). Schermi di fase di
+  Kolmogorov (FFT, normalizzati sulla funzione di struttura 6,88 (r/r0)^5/3) sulla pupilla di un 280 mm con
+  ostruzione 0,33 (griglia 512, pupilla 48 px: pixel fine 0,094 λ/D); 400 fotogrammi, tenuti i più nitidi (picco),
+  ricentrati sul proprio baricentro con errore residuo, sommati. Fase ∝ 1/λ e PSF ∝ λ per R/G/B (620/550/460 nm;
+  mono 680 nm), striscia di dispersione verticale (blu 0,4–0,8 λ/D, verde ×0,55, rosso ×0,3). Tre serate:
+  calma D/r0 2,5 tiene 30 %, media 4,5 tiene 20 %, turbolenta 7,5 tiene 10 %. MTF a 0,05/0,1/0,25 del taglio di
+  diffrazione: 0,84/0,68/0,33, 0,75/0,51/0,16, 0,60/0,29/0,05: l'alone toglie il 15–40 % alle strutture più
+  grandi. Sfocare la verità con la PSF sommata equivale a sommare i fotogrammi sfocati (linearità). Scala del pixel
+  dalla dimensione: λ/D = 0,405″ (280 mm, 550 nm), Giove 44″, Saturno con anelli 42″, Marte 20″; Luna e Sole 0,22–0,3
+  λ/D nelle zone, 0,5 sul disco intero.
+- **Curva più lunga.** `learned::GRID` ha 14 punti da 0,1× il taglio (`STEPS`); la tabella parte da 0,05; le scale
+  della nitidezza intelligente arrivano a ~50 px (prima 25).
+- **Dati e modello.** `ml_ref.rs` → `target/ml_lucky` (549 esempi, 61 verità, 18 gruppi, BXT su 61). Curve ideali
+  mediane per serata a 0,1/0,5/1× il taglio: calma 1,4/5,4/9,5, media 1,5/9/20, turbolenta 1,5/10/35; BXT sugli
+  stessi casi 1,22/4,4/11,8 contro verità 1,45/9/18,5: con il seeing vero anche BXT è prudente sotto il taglio, ma
+  oltre 1,5× il taglio continua a rinforzare (verità < 1). Scelto ridge λ=10 sulla verità: errore curva 0,55
+  contro 1,09 della fissa automatica e 0,87 della fissa al 100 %; BXT dista 0,68 dalla verità.
+- **Prova sulle immagini** (`ml_eval_ref.rs`, `target/ml_lucky/eval`, mediane, 1 = nessuna nitidezza). Luminanza:
+  fissa 0,89, modello 0,59 (su R, G, B 0,59), ×1,5 0,60, curva ideale 0,55, BXT 0,65 (sui suoi 61 casi modello
+  0,52); vince sulla fissa nel 90 %. Colore (piani R−L, B−L): in luminanza 1,00 (fermo), su R, G, B 0,78, BXT 0,75;
+  pianeti 0,67 contro BXT 0,67, dischi interi peggio (1,09). Sulle grezze vere della Luna R, G, B separati fanno
+  frange colorate: `preset::learned_colour` sceglie R, G, B per la curva appresa solo su pianeti e Saturno a colori
+  (scegliendo la curva nel menu cambia anche il modo colore; tornando a un'altra si riprende quello automatico).
+- **Riprese vere** (`ml_check.rs`, `target/ml_lucky/check.txt`): risponde su 71 di 86, forza mediana 159 %, 30 al
+  massimo (190 %). Diagnosi ripetuta (`target/ml_diag/diag_g1.tsv`): ora a 0,1× il taglio ×1,32 (BXT ×1,19), a 0,5×
+  ×7,9 (BXT ×4,7), dispersione della luminanza ×1,37 (BXT ×1,22): il «colpo» c'è, anche più di BXT; su Giove a volte
+  troppo (grana ai poli): il tetto di forza è nel gruppo 2.
+- **Un solo modello.** `learned.rs` senza `Model`: `predict`, `smart_curve`, `to_smart`, `IN_USE: bool`. Tolta
+  «Appresa dagli stack»: `SmartCurve::Learned` ha etichetta «Appresa dai riferimenti» e accetta anche il vecchio nome
+  `LearnedRef` (serde alias) nei progetti salvati; `SmartParams` ha solo `learned` e `learned_strength`.
+- **Spiegazione.** `learned::explain` divide la risposta, rispetto all'immagine media di addestramento (z = 0),
+  in sei fattori (`learned::Factor`: taglio, rumore, forma dello spettro, grandezza, colore, tipo) al picco e
+  sulle strutture grandi (≤ 0,35× il taglio). `ps-core/src/bands.rs` misura bande scure e zone chiare (profilo
+  sulla striscia centrale, tendenza quartica tolta, direzione cercata su un disco o data dagli anelli di Saturno),
+  in `Analysis::bands`. Nella scheda, con la curva appresa, il riquadro «Perché questa curva»: cosa ha misurato
+  (dettaglio più fine e suo rinforzo, bande e loro rinforzo, soggetto, S/R) e i tre fattori che hanno pesato di
+  più; nel grafico la fascia delle bande.
+
+
+### Nitidezza appresa, gruppo 2: tre serate, pulizia della grana, automatica (12 novembre 2026)
+
+- **Tre ipotesi sul seeing.** Oltre al modello unico, uno per serata (`learned::Night`: calma, media, turbolenta),
+  ciascuno addestrato solo sugli esempi di quella serata (`ml_train.rs` scrive `learned_data.rs` con `ALL` e
+  `NIGHTS`, struttura `learned::Weights`). Escludendo un riferimento alla volta, sulla propria serata: calma 0,61
+  contro 0,72 del modello unico, media 0,63 contro 0,65, turbolenta 0,46 contro 0,57. Un modello di serata che
+  trova l'immagine fuori dal suo intervallo non risponde (ipotesi improbabile). `learned::nights` dà le curve,
+  `nights_differ` dice se differiscono (oltre il 35 % da qualche parte fino al taglio). Sulle grezze: risponde su
+  71 di 86, confronto offerto su 69 (tutte e tre su 33, calma e media su 31).
+- **Nella scheda.** `SmartParams::learned_nights` e `night` (scelta; `None` = modello unico). Riquadro «Tre ipotesi
+  sul seeing»: tre miniature 128 px del centro del soggetto (`ps-app/src/smart_compare.rs`, in un thread, sulla
+  sorgente; chiave = sorgente + impostazioni tranne serata e forza), passando sopra si ingrandisce, clic sceglie
+  (e prende la forza di quella serata), clic di nuovo torna al modello unico. Istantanea: test ignorato
+  `snapshot_smart_learned`.
+- **Pulizia della grana.** Il modello impara anche guadagni sotto 1 oltre il taglio (da ×0,3, `learned::MIN_GAIN`):
+  la tabella ha valori negativi dopo il picco (prima del picco mai sotto 0), si prolunga fino a 8× il taglio;
+  `SmartParams::cleans_itself` salta la pulizia generica e `grain_from`/`finest` partono da dove la tabella scende
+  sotto 0. Errore immagine quasi invariato (0,596 contro 0,593): la pulizia è prudente.
+- **Automatica.** `learned::IN_USE = true`: la nitidezza intelligente automatica usa la curva appresa con la sua
+  forza fino a `preset::LEARNED_CAP` = 120 % (sulle grezze la forza proposta ha mediana 160 %; il cursore arriva a
+  190 %); colore R, G, B sui pianeti a colori (`preset::learned_colour`). Prova sulle immagini (`target/ml_lucky/eval2`):
+  luminanza 0,60 (fissa 0,89, BXT 0,65), colore 0,87 complessivo, pianeti 0,67 (BXT 0,67).
+- **Aperto.** Luna: con R, G, B no (frange), ma anche in luminanza la curva piena lascia più grana di BXT; serve il
+  gruppo 3 (mappe per zona, riferimenti LRO).
+
 ## 6. Interfaccia
 
 ```

@@ -1,10 +1,10 @@
 # Planetary Studio — planetary image processing and sharpening for Mac, Windows and Linux
 
-**Fast, non-destructive processing of stacked planetary and lunar images: wavelet sharpening, deconvolution, noise reduction and lunar mosaics — a free alternative to RegiStax and AstroSurface for macOS, Windows and Linux.**
+**Fast, non-destructive processing of stacked planetary and lunar images: learned planetary sharpening, wavelets, deconvolution, noise reduction and lunar mosaics — a free alternative to RegiStax and AstroSurface for macOS, Windows and Linux, in English and Italian.**
 
 🇮🇹 [Leggi in italiano](README.it.md)
 
-![Planetary Studio processing a Saturn image on macOS: planetary sharpening with wavelets and deconvolution](docs/screenshots/main.png)
+![Planetary Studio processing Saturn on macOS: learned planetary sharpening after wavelets and deconvolution](docs/screenshots/main.png)
 
 Planetary Studio picks up where your stacker (AutoStakkert!, RegiStax, …) leaves off: it sharpens, cleans and finishes the stacked TIFF of Jupiter, Saturn, Mars or the Moon — the astrophotography workflow after lucky imaging. It recognises what you opened, proposes sensible settings and explains why — while every slider stays in your hands.
 
@@ -30,11 +30,15 @@ Get the latest version from the **[Releases page](../../releases/latest)**:
 - **Automatic recognition** of the subject (planet, Saturn, full disk, lunar surface) with structural settings and explanations of every automatic choice.
 - **Deconvolution** — Richardson–Lucy (accelerated, with TV regularisation and damping) and Wiener; PSF measured from the image, drawn on a box, or picked from a star; built-in anti-ringing.
 - **Wavelets** — isotropic starlet (*à trous*) with free scales placed from the image spectrum, or classic 1-2-4-8 scales; noise-adaptive gains and edge protection.
-- **Final sharpening** — works on the result of every other sharpening step and boosts exactly the scales where real detail is, stopping at the detail limit measured on the image's spectrum.
+- **Learned final sharpening** — a small model picks how much to boost each size of detail, from the belts of Jupiter down to the finest detail the seeing left; the pixels are always computed by classic wavelets, nothing is invented. It was trained on sharp Hubble, Cassini, SDO and NASA images seen through simulated lucky-imaging seeing (hundreds of turbulent frames, the best aligned and stacked). When the image can't tell how turbulent the night was, it shows the result under calm, average and turbulent seeing side by side, and it explains its choice: the belts and zones it measured, where the detail ends, what weighed most.
 - **Noise reduction** tuned per subject, **dering** with a brush: paint over the dark ring (inside the limb, in the sky around it, beside a crater) and it is measured and lifted to its surroundings, edges and belts untouched, **curves and levels** (per channel), **colour**, RGB alignment, Mineral Moon.
 - **Masks** — process Saturn's rings, its globe, the moons or a painted zone with their own settings. A clear list shows each mask's thumbnail, what it changes and its order (drag to reorder).
 - **A/B compare**, split before/after view, ROI preview.
 - **Equipment & diagnostics** — telescope/camera catalogue, FireCapture/SharpCap/AutoStakkert! log reading, image scale from ephemerides, spectrum graph.
+- **Identify & label** — names of the moons of Jupiter and Saturn, lunar craters and maria, solar orientation, from the capture time; export with the names on the image.
+- **Colour** — Jupiter's colour matched to NASA maps belt by belt (photometric colour), solar false-colour palettes for H-alpha.
+- **Resize on export** with classic kernels (Lanczos, Mitchell) chosen per subject.
+- **Interface in English and Italian** (switch in Settings).
 - **Mosaics** of lunar panels taken with the same focal length.
 - **Formats**: TIFF 8/16/32-bit, FITS, PNG, JPEG.
 - **GPU acceleration** (Metal, DirectX 12, Vulkan through wgpu) with automatic CPU fallback.
@@ -42,16 +46,28 @@ Get the latest version from the **[Releases page](../../releases/latest)**:
 
 ## Gallery
 
+All pictures are the author's own captures, processed in the app.
+
 | | |
 |---|---|
-| ![Jupiter before and after wavelet sharpening and deconvolution, split view](docs/screenshots/jupiter-before-after.png) | ![Saturn with its rings processed through a dedicated mask](docs/screenshots/saturn-masks.png) |
-| **Jupiter** — before/after split view | **Saturn** — rings sharpened with their own mask |
+| ![Jupiter before and after planetary sharpening, split view](docs/screenshots/jupiter-before-after.png) | ![Saturn with its rings processed through a dedicated mask](docs/screenshots/saturn-masks.png) |
+| **Jupiter** — before/after split view | **Saturn** — rings with their own mask |
 | ![Close-up of lunar craters before and after sharpening](docs/screenshots/moon-detail.png) | ![Lunar mosaic assembled from two panels](docs/screenshots/lunar-mosaic.png) |
 | **Moon** — crater detail, before/after | **Lunar mosaic** — panels aligned and blended |
 
-![Before/after split view](docs/screenshots/compare.png)
+### Learned sharpening, explained
 
-The interface is currently in Italian.
+<img src="docs/screenshots/learned-sharpening.png" width="360" align="right" alt="The final sharpening card: three guesses at the seeing and why the curve is shaped so">
+
+The final sharpening card with the learned curve on Jupiter:
+
+- **Three guesses at the seeing** — the subject under calm, average and turbulent seeing; click the one that looks right.
+- **Why this curve** — what was measured (finest detail, dark belts and bright zones with their widths, subject, signal over noise) and which of them pushed the curve up or down.
+- **The response graph** — how much each size of detail is boosted, with the band of the planet's belts shaded.
+
+The model only chooses settings; the sharpening itself is mathematical and reproducible.
+
+<br clear="right">
 
 ## Building from source
 

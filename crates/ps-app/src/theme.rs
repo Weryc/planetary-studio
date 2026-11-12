@@ -15,7 +15,19 @@ pub const SUCCESS: Color32 = Color32::from_rgb(110, 196, 140);
 pub const WARNING: Color32 = Color32::from_rgb(230, 190, 90);
 pub const DANGER: Color32 = Color32::from_rgb(230, 105, 95);
 
-pub const RADIUS: u8 = 6;
+pub const RADIUS: u8 = radius::M;
+
+/// Corner radii (points). Pills (radius = half their height) and hand-drawn shapes keep their own.
+pub mod radius {
+    /// Thumbnails, small badges.
+    pub const S: u8 = 4;
+    /// Controls, boxes inside a card.
+    pub const M: u8 = 6;
+    /// Cards, nested groups, stand-alone buttons.
+    pub const L: u8 = 8;
+    /// Windows and dialogs.
+    pub const WINDOW: u8 = 10;
+}
 
 /// The one spacing scale of the interface (points): every gap is one of these.
 pub mod space {
@@ -31,12 +43,16 @@ pub mod space {
 
 /// The text sizes of the interface (points).
 pub mod size {
+    /// Window and dialog titles.
+    pub const HEADING: f32 = 15.0;
     /// Card titles.
     pub const TITLE: f32 = 14.0;
     /// Controls and values.
     pub const BODY: f32 = 13.0;
     /// Hints, section labels, units.
     pub const SMALL: f32 = 11.0;
+    /// Small icons: in segmented controls, beside hints and status lines.
+    pub const ICON_SMALL: f32 = 14.0;
     /// Icons next to body text.
     pub const ICON: f32 = 17.0;
 }
@@ -67,7 +83,7 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Dark);
     ctx.style_mut_of(egui::Theme::Dark, |style| {
         style.text_styles = [
-            (TextStyle::Heading, FontId::new(15.0, FontFamily::Proportional)),
+            (TextStyle::Heading, FontId::new(size::HEADING, FontFamily::Proportional)),
             (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
             (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
             (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
@@ -89,8 +105,8 @@ pub fn apply(ctx: &egui::Context) {
         v.panel_fill = PANEL;
         v.window_fill = PANEL;
         v.window_stroke = Stroke::new(1.0, BORDER);
-        v.window_corner_radius = CornerRadius::same(10);
-        v.menu_corner_radius = CornerRadius::same(8);
+        v.window_corner_radius = CornerRadius::same(radius::WINDOW);
+        v.menu_corner_radius = CornerRadius::same(radius::L);
         v.window_shadow = Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(140) };
         v.popup_shadow = Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(120) };
         v.extreme_bg_color = BG;
@@ -144,6 +160,6 @@ pub fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
 pub fn card() -> egui::Frame {
     egui::Frame::new()
         .fill(SURFACE)
-        .corner_radius(CornerRadius::same(8))
+        .corner_radius(CornerRadius::same(radius::L))
         .inner_margin(Margin::same(10))
 }

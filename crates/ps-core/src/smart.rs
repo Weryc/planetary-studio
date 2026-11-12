@@ -52,11 +52,21 @@ pub struct SmartParams {
     pub include_sky: bool,
     /// Roll the brightest values off before they reach white, so they never clip.
     pub protect_highlights: bool,
+    /// The shape picked for this image by the learned model ([`crate::learned`]), used by
+    /// [`SmartCurve::Learned`]: (frequency over the cut-off, log-gain over the peak's).
+    pub learned: Vec<(f32, f32)>,
+    /// The strength the learned model suggests with its shape.
+    pub learned_strength: f32,
+    /// The learned curve under each hypothesis on the seeing (strength, shape), for those the
+    /// models answered; `night` picks one of them instead of the main model's.
+    pub learned_nights: Vec<crate::learned::NightCurve>,
+    pub night: Option<crate::learned::Night>,
 }
 
 /// Shape of the boost across sizes of detail, relative to the cut-off. The default is the one
 /// measured on BlurXTerminator; the others are variations of it designed for particular cases
-/// (not measured).
+/// (not measured). `Learned` is the one the learned model picks for the image (Standard when
+/// there is none).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SmartCurve {
     #[default]
@@ -65,6 +75,10 @@ pub enum SmartCurve {
     GoodSeeing,
     Surface,
     SmoothGlobe,
+    /// Earlier versions also had a model trained on the stacks themselves (dropped: its truth
+    /// wasn't sharp); projects saved with either open with this one.
+    #[serde(alias = "LearnedRef")]
+    Learned,
 }
 
 impl SmartCurve {
@@ -77,6 +91,7 @@ impl SmartCurve {
             Self::GoodSeeing => tl("Seeing ottimo"),
             Self::Surface => tl("Luna e superfici"),
             Self::SmoothGlobe => tl("Globi lisci"),
+            Self::Learned => tl("Appresa dai riferimenti"),
         }
     }
 
@@ -87,6 +102,7 @@ impl SmartCurve {
             Self::GoodSeeing => tl("Spinge fino al dettaglio più fine e un po' oltre, tocca meno le strutture grandi. Per immagini nitide e poco rumorose."),
             Self::Surface => tl("Spinta larga su tutte le dimensioni: crateri piccoli e grandi, montagne, bordi di ombre. Per la Luna e le riprese ravvicinate."),
             Self::SmoothGlobe => tl("Più dolce sul dettaglio finissimo, dove un globo liscio (Saturno, Urano, Venere) mostra solo grana: valorizza bande e divisioni senza macchiettare."),
+            Self::Learned => tl("Forma e forza scelte da un piccolo modello che ha imparato da immagini nitide di Hubble, Cassini, SDO e della NASA, riportate a dimensioni amatoriali e viste attraverso un seeing simulato come in uno stack vero: centinaia di fotogrammi con turbolenza, i migliori allineati e sommati. Decide solo le impostazioni: i pixel li calcolano sempre le wavelet."),
         }
     }
 
@@ -99,29 +115,20 @@ impl SmartCurve {
             Self::GoodSeeing => &[(0.15, 0.0), (0.25, 0.12), (0.35, 0.22), (0.5, 0.4), (0.7, 0.65), (0.85, 0.85), (1.0, 0.97), (1.15, 1.0), (1.3, 0.9), (1.5, 0.68), (1.7, 0.42), (2.0, 0.15), (2.3, 0.0)],
             Self::Surface => &[(0.07, 0.0), (0.15, 0.22), (0.25, 0.4), (0.35, 0.55), (0.5, 0.72), (0.7, 0.88), (0.85, 0.97), (1.0, 1.0), (1.15, 0.92), (1.3, 0.75), (1.5, 0.45), (1.7, 0.2), (2.0, 0.02), (2.2, 0.0)],
             Self::SmoothGlobe => &[(0.10, 0.0), (0.18, 0.15), (0.25, 0.3), (0.35, 0.48), (0.5, 0.72), (0.7, 0.93), (0.85, 1.0), (1.0, 0.92), (1.15, 0.72), (1.3, 0.48), (1.5, 0.22), (1.7, 0.05), (1.9, 0.0)],
+            Self::Learned => Self::Standard.table(),
         }
     }
+}
 
-    fn shape(self, r: f32) -> f32 {
-        let t = self.table();
-        let (first, last) = (t[0], t[t.len() - 1]);
-        if r <= first.0 || r >= last.0 {
-            return 0.0;
-        }
-        let i = t.iter().position(|q| q.0 >= r).unwrap_or(t.len() - 1).max(1);
-        let (a, b) = (t[i - 1], t[i]);
-        a.1 + (b.1 - a.1) * (r / a.0).ln() / (b.0 / a.0).ln()
+/// Value of a shape table at `r` (log-linear between points, 0 outside).
+fn shape_in(t: &[(f32, f32)], r: f32) -> f32 {
+    let (first, last) = (t[0], t[t.len() - 1]);
+    if r <= first.0 || r >= last.0 {
+        return 0.0;
     }
-
-    /// Past this multiple of the cut-off there is only grain: it starts being cleaned.
-    fn grain_from(self) -> f32 {
-        self.table().last().map_or(1.9, |q| 0.86 * q.0)
-    }
-
-    /// Where the finest boosted layer should peak, over the cut-off.
-    fn finest(self) -> f32 {
-        self.table().last().map_or(1.8, |q| 0.82 * q.0)
-    }
+    let i = t.iter().position(|q| q.0 >= r).unwrap_or(t.len() - 1).max(1);
+    let (a, b) = (t[i - 1], t[i]);
+    a.1 + (b.1 - a.1) * (r / a.0).ln() / (b.0 / a.0).ln()
 }
 
 impl Default for SmartParams {
@@ -136,6 +143,10 @@ impl Default for SmartParams {
             color: ColorMode::Luminance,
             include_sky: false,
             protect_highlights: true,
+            learned: Vec::new(),
+            learned_strength: 0.0,
+            learned_nights: Vec::new(),
+            night: None,
         }
     }
 }
@@ -146,6 +157,48 @@ const PEAK_AT_FULL: f32 = 12.0;
 pub const MAX_STRENGTH: f32 = 1.9;
 
 impl SmartParams {
+    /// The shape table in use: the learned one when chosen and present.
+    fn table(&self) -> &[(f32, f32)] {
+        match self.curve {
+            SmartCurve::Learned => match self.night.and_then(|n| self.learned_nights.iter().find(|q| q.0 == n)) {
+                Some(q) => &q.2,
+                None if self.learned.len() >= 2 => &self.learned,
+                None => SmartCurve::Standard.table(),
+            },
+            curve => curve.table(),
+        }
+    }
+
+    fn shape(&self, r: f32) -> f32 {
+        shape_in(self.table(), r)
+    }
+
+    /// Past this multiple of the cut-off there is only grain: it starts being cleaned. A learned
+    /// table says it itself: where it first goes below 1 past its peak.
+    fn grain_from(&self) -> f32 {
+        let t = self.table();
+        if self.cleans_itself() {
+            let top = t.iter().enumerate().max_by(|a, b| a.1.1.total_cmp(&b.1.1)).map_or(0, |q| q.0);
+            if let Some(q) = t[top..].iter().find(|q| q.1 <= 0.0) {
+                return q.0;
+            }
+        }
+        t.last().map_or(1.9, |q| 0.86 * q.0)
+    }
+
+    /// The learned shape carries its own cleaning of the grain (values below 0 past the peak).
+    fn cleans_itself(&self) -> bool {
+        self.curve == SmartCurve::Learned && self.table().iter().any(|q| q.1 < 0.0)
+    }
+
+    /// Where the finest boosted layer should peak, over the cut-off.
+    fn finest(&self) -> f32 {
+        if self.cleans_itself() {
+            return 0.95 * self.grain_from();
+        }
+        self.table().last().map_or(1.8, |q| 0.82 * q.0)
+    }
+
     /// Share of the grain past the cut-off that is removed: follows the strength.
     pub fn effective_cleaning(&self) -> f32 {
         0.6 * self.strength.clamp(0.0, 1.0)
@@ -157,7 +210,8 @@ impl SmartParams {
 
     /// What [`prepare`] depends on (besides the images).
     pub fn prepare_key(&self) -> PrepareKey {
-        PrepareKey { cutoff: self.cutoff.to_bits(), peak: self.peak.to_bits(), curve: self.curve, adaptive: self.adaptive, color: self.color }
+        let learned = self.table().iter().fold(0u64, |h, &(r, v)| h.rotate_left(7) ^ (u64::from(r.to_bits()) << 32 | u64::from(v.to_bits())));
+        PrepareKey { cutoff: self.cutoff.to_bits(), peak: self.peak.to_bits(), curve: self.curve, learned, adaptive: self.adaptive, color: self.color }
     }
 
     /// The overall response wanted at `f` given what earlier steps did (`done`): never below 1
@@ -165,16 +219,19 @@ impl SmartParams {
     /// detail (grain, and noise they amplified, is cleaned).
     fn wanted(&self, f: f32, cutoff: f32, done: &Done) -> f32 {
         let want = self.target(f, cutoff) / done.at(f);
-        if f <= self.curve.grain_from() * self.peak * cutoff { want.max(1.0) } else { want }
+        if f <= self.grain_from() * self.peak * cutoff { want.max(1.0) } else { want }
     }
 
     /// Target overall response at `f` cycles/px for the cut-off `cutoff`.
     pub fn target(&self, f: f32, cutoff: f32) -> f32 {
         let r = f.max(1e-4) / (self.peak * cutoff).max(1e-3);
         let peak = 1.0 + (PEAK_AT_FULL - 1.0) * self.strength.clamp(0.0, MAX_STRENGTH);
-        let t = ((r - self.curve.grain_from()) / 0.6).clamp(0.0, 1.0);
+        let t = ((r - self.grain_from()) / 0.6).clamp(0.0, 1.0);
         let beyond = t * t * (3.0 - 2.0 * t);
-        peak.powf(self.curve.shape(r)) * (1.0 - 0.9 * self.effective_cleaning() * beyond)
+        if self.cleans_itself() {
+            return peak.powf(self.shape(r));
+        }
+        peak.powf(self.shape(r)) * (1.0 - 0.9 * self.effective_cleaning() * beyond)
     }
 }
 
@@ -187,11 +244,12 @@ fn layer_peak(scale: f32, ratio: f32) -> f32 {
 }
 
 /// Free-scale transform with its first layer peaking at `peak` cycles/px, half an octave
-/// apart up to ~25 px. Everything finer is grain.
+/// apart up to ~50 px (the broad belts and zones of a large planet need the coarse layers).
+/// Everything finer is grain.
 fn transform(peak: f32) -> WaveletParams {
     let ratio = std::f32::consts::SQRT_2;
     let first = (layer_peak(1.0, ratio) / peak.max(0.04)).clamp(1.0, 5.0);
-    let levels = (((25.0 / first).ln() / ratio.ln()).ceil() as usize + 1).clamp(4, 10);
+    let levels = (((50.0 / first).ln() / ratio.ln()).ceil() as usize + 1).clamp(4, 12);
     WaveletParams { scale_mode: ScaleMode::Free, first_scale: first, ratio, layers: vec![WaveletLayer::default(); levels], noise_adaptive: 0.0, edge_protection: 0.0, ..Default::default() }
 }
 
@@ -268,6 +326,7 @@ pub struct PrepareKey {
     cutoff: u32,
     peak: u32,
     curve: SmartCurve,
+    learned: u64,
     adaptive: bool,
     color: ColorMode,
 }
@@ -310,7 +369,7 @@ fn prepare_plane(plane: &[f32], before: Option<&[f32]>, w: usize, h: usize, p: &
     let cutoff = cutoff_of(p, before.unwrap_or(plane), w, h);
     let fp = p.peak * cutoff;
     let done = before.map_or_else(Done::default, |b| Done::measure(plane, b, w, h));
-    let transform = transform(p.curve.finest() * fp);
+    let transform = transform(p.finest() * fp);
     let Some(mut d) = decompose(plane, w, h, &transform, &|| false) else {
         return PreparedPlane { cutoff, transform, layers: Vec::new(), band: vec![0.0; plane.len()], done };
     };
@@ -319,7 +378,7 @@ fn prepare_plane(plane: &[f32], before: Option<&[f32]>, w: usize, h: usize, p: &
     let mut layers = Vec::new();
     for (j, mut layer) in std::mem::take(&mut d.layers).into_iter().enumerate() {
         // Layers the curve never boosts, at any strength, aren't needed.
-        if p.curve.shape(layer_peak(transform.scale(j), transform.ratio) / fp) <= 0.0 {
+        if p.shape(layer_peak(transform.scale(j), transform.ratio) / fp) <= 0.0 {
             continue;
         }
         if let Some(light) = &light {
@@ -447,7 +506,7 @@ pub fn hold_back_map(plane: &[f32], w: usize, h: usize, p: &SmartParams) -> (Vec
     let cutoff = cutoff_of(p, plane, w, h);
     let fp = p.peak * cutoff;
     let probe = SmartParams { strength: p.strength.max(0.35), ..p.clone() };
-    let transform = transform(p.curve.finest() * fp);
+    let transform = transform(p.finest() * fp);
     let Some(d) = decompose(plane, w, h, &transform, &|| false) else { return (vec![0.0; plane.len()], vec![0.0; plane.len()]) };
     let protect = p.limb_protection.clamp(0.0, 1.0);
     let edges = if protect > 0.0 { limb_band(d.edges(), w, h, fp).into_iter().map(|e| protect * e).collect() } else { vec![0.0; plane.len()] };

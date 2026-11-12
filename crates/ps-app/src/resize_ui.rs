@@ -12,6 +12,7 @@ use crate::panels::hint;
 use crate::theme::{self, TEXT, TEXT_WEAK};
 use crate::widgets::{ParamSlider, segmented, toggle};
 use eframe::egui::{self, ColorImage, RichText, TextureHandle, TextureOptions, Ui, Vec2};
+use egui_material_icons::icons::*;
 use ps_core::Image;
 use ps_core::analysis::ImageKind;
 use ps_core::resample::{self, Method, ResizeParams};
@@ -130,7 +131,8 @@ pub fn resize_body(ui: &mut Ui, s: &mut ResizeSettings, view: ResizeView) {
             }
             ui.horizontal(|ui| {
                 for f in [0.5f32, 1.5, 2.0, 3.0, 4.0] {
-                    if ui.selectable_label((s.scale - f).abs() < 1e-3, format!("×{f}")).clicked() {
+                    let mut on = (s.scale - f).abs() < 1e-3;
+                    if ui.toggle_value(&mut on, format!("×{f}")).clicked() {
                         s.scale = f;
                     }
                 }
@@ -140,8 +142,7 @@ pub fn resize_body(ui: &mut Ui, s: &mut ResizeSettings, view: ResizeView) {
             ui.label(RichText::new(format!("{w} × {h} → {ow} × {oh} px")).color(TEXT).strong());
             let (method, _, _) = s.method(kind, sun);
             ui.label(RichText::new(tr!("Metodo: {}{}", "Method: {}{}", method.label(), if s.method.is_none() { tl(" (scelto per il soggetto)") } else { "" })).size(theme::size::SMALL).color(TEXT_WEAK));
-            ui.add_space(theme::space::XS);
-            egui::CollapsingHeader::new(RichText::new(tl("Avanzate")).size(theme::size::SMALL).color(TEXT_WEAK)).id_salt("resize-advanced").default_open(false).show(ui, |ui| advanced(ui, s, (w, h), kind, sun, &image, centre, preview));
+            crate::panels::advanced(ui, "resize-advanced", tl("Avanzate"), false, |ui| advanced(ui, s, (w, h), kind, sun, &image, centre, preview));
         });
     });
 }
@@ -150,7 +151,7 @@ pub fn resize_body(ui: &mut Ui, s: &mut ResizeSettings, view: ResizeView) {
 fn advanced(ui: &mut Ui, s: &mut ResizeSettings, (w, h): (usize, usize), kind: ImageKind, sun: bool, image: &Arc<Image>, centre: (f32, f32), preview: &mut ResizePreview) {
     let section = |ui: &mut Ui, title: &str| {
         ui.add_space(theme::space::S);
-        ui.label(RichText::new(title).size(theme::size::SMALL).strong().color(TEXT_WEAK));
+        ui.label(crate::widgets::caps(title));
     };
     section(ui, tl("DIMENSIONE IN"));
     segmented(ui, &mut s.unit, &[(SizeUnit::Percent, None, tl("Percentuale")), (SizeUnit::Pixels, None, "Pixel"), (SizeUnit::Centimetres, None, tl("Centimetri"))]);
@@ -192,7 +193,8 @@ fn advanced(ui: &mut Ui, s: &mut ResizeSettings, (w, h): (usize, usize), kind: I
                     s.dpi = dpi;
                 }
                 for d in [150.0, 300.0, 600.0] {
-                    if ui.selectable_label(s.dpi == d, format!("{d:.0}")).clicked() {
+                    let mut on = s.dpi == d;
+                    if ui.toggle_value(&mut on, format!("{d:.0}")).clicked() {
                         s.dpi = d;
                     }
                 }
@@ -253,7 +255,7 @@ fn advanced(ui: &mut Ui, s: &mut ResizeSettings, (w, h): (usize, usize), kind: I
             ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(60.0);
             ui.add(egui::Slider::new(&mut preview.zoom, 1.0..=MAX_ZOOM).logarithmic(true).show_value(false)).on_hover_text(tl("Avvicina o allontana l'anteprima"));
             ui.label(RichText::new(format!("×{:.1}", preview.zoom)).size(theme::size::SMALL).color(TEXT));
-            if ui.small_button(tl("Centra")).on_hover_text(tl("Torna alla vista iniziale")).clicked() {
+            if ui.button((ICON_FIT_SCREEN.rich_text(), tl("Centra"))).on_hover_text(tl("Torna alla vista iniziale")).clicked() {
                 preview.zoom = 1.0;
                 preview.pan = (0.0, 0.0);
             }
@@ -262,7 +264,7 @@ fn advanced(ui: &mut Ui, s: &mut ResizeSettings, (w, h): (usize, usize), kind: I
     let mut pan = egui::Vec2::ZERO;
     if let Some(tiles) = &preview.tiles {
         for (tex, label) in tiles.iter().zip([tl("Pixel originali"), method.label()]) {
-            let r = ui.add(egui::Image::new(tex).fit_to_exact_size(Vec2::new(width, height)).corner_radius(4).sense(egui::Sense::hover()));
+            let r = ui.add(egui::Image::new(tex).fit_to_exact_size(Vec2::new(width, height)).corner_radius(theme::radius::S).sense(egui::Sense::hover()));
             if r.hovered() {
                 // The wheel (or two-finger scroll) explores the image; zoom is the slider's.
                 pan -= ui.input(|i| i.smooth_scroll_delta);
@@ -294,7 +296,7 @@ fn kind_label(kind: ImageKind, sun: bool) -> &'static str {
 fn make_tiles(ctx: &egui::Context, image: &Image, centre: (f32, f32), scale: f32, method: Method, anti: f32, zoom: f32, tile: (usize, usize)) -> Option<[TextureHandle; 2]> {
     let (w, h) = (image.width(), image.height());
     // Source pixels covered by the tile; the tile is later stretched `zoom` times by the screen.
-    let cover = |side: usize| (((side as f32 / (scale * zoom)).ceil()) as usize).clamp(4, w.min(h));
+    let cover = |side: usize| (((side as f32 / (scale * zoom)).ceil()) as usize).max(4).min(w.min(h));
     let (cw, ch) = (cover(tile.0).min(w), cover(tile.1).min(h));
     let x = (centre.0 as isize - cw as isize / 2).clamp(0, (w - cw) as isize) as usize;
     let y = (centre.1 as isize - ch as isize / 2).clamp(0, (h - ch) as isize) as usize;

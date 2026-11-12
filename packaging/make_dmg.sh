@@ -14,6 +14,7 @@ BIN="ps-app"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+source "$ROOT/packaging/private_paths.sh"
 
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 OUT="$ROOT/target/dmg"

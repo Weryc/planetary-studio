@@ -45,7 +45,7 @@ fn one() -> f32 {
 
 impl Orientation {
     /// Image offset (y down) of a body-frame offset (y = north up).
-    fn to_image(self, x: f64, y: f64) -> (f64, f64) {
+    pub(crate) fn to_image(self, x: f64, y: f64) -> (f64, f64) {
         let (s, c) = (self.angle as f64 * RAD).sin_cos();
         let ux = if self.mirrored { -x } else { x };
         let uy = -y;
@@ -53,7 +53,7 @@ impl Orientation {
     }
 
     /// Body-frame offset of an image offset.
-    fn body_offset(self, dx: f64, dy: f64) -> (f64, f64) {
+    pub fn body_offset(self, dx: f64, dy: f64) -> (f64, f64) {
         let (s, c) = (self.angle as f64 * RAD).sin_cos();
         let (ux, uy) = (c * dx + s * dy, -s * dx + c * dy);
         (if self.mirrored { -ux } else { ux }, -uy)
@@ -199,6 +199,12 @@ pub struct TimeFit {
 /// stretch around `orientation`, for what puts every moon of `body` on a bright spot of the image
 /// at once. Several moons pin the three numbers down together; with a single one only the time moves.
 pub fn fit_time(img: &Image, body: Body, when: &Moment, orientation: Orientation, window_min: f64) -> Option<TimeFit> {
+    fit_time_with(img, body, when, orientation, window_min, true)
+}
+
+/// As [`fit_time`]; with `fit_orientation` off only the time moves and the turn and distances
+/// stay as given.
+pub fn fit_time_with(img: &Image, body: Body, when: &Moment, orientation: Orientation, window_min: f64, fit_orientation: bool) -> Option<TimeFit> {
     if !matches!(body, Body::Jupiter | Body::Saturn) {
         return None;
     }
@@ -249,7 +255,7 @@ pub fn fit_time(img: &Image, body: Body, when: &Moment, orientation: Orientation
     let penalty = |dt: f64, da: f64, sc: f64| 1e-6 * dt.abs() + 0.01 * da.abs() + 0.5 * (sc - 1.0).abs();
     let (_, _, moons_in_field) = eval(0.0, 0.0, 1.0, tolerance);
     // One moon can't pin the turn and the stretch down as well as the time.
-    let free = moons_in_field >= 2;
+    let free = fit_orientation && moons_in_field >= 2;
     let turns: Vec<f64> = if free { (-4..=4).map(|k| k as f64 * 1.5).collect() } else { vec![0.0] };
     let stretches: Vec<f64> = if free { (-4..=4).map(|k| 1.0 + k as f64 * 0.02).collect() } else { vec![1.0] };
     let steps = window_min.ceil() as i64;
@@ -441,6 +447,22 @@ fn outline(lum: &[f32], w: usize, h: usize) -> Option<Outline> {
     let major = percentile(&major, 0.999) + 0.5;
     let minor = percentile(&minor, 0.999) + 0.5;
     Some(Outline { cx: cx as f32, cy: cy as f32, angle, major, minor, level: percentile(&level, 0.5), background, noise, mask })
+}
+
+/// The planet's outline, for other modules: centre, major-axis direction (radians, y down) and
+/// half-lengths in pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanetShape {
+    pub cx: f32,
+    pub cy: f32,
+    pub angle: f64,
+    pub major: f32,
+    pub minor: f32,
+}
+
+/// Where the planet is on a luminance plane, if there is one.
+pub fn planet_shape(lum: &[f32], w: usize, h: usize) -> Option<PlanetShape> {
+    outline(lum, w, h).map(|o| PlanetShape { cx: o.cx, cy: o.cy, angle: o.angle, major: o.major, minor: o.minor })
 }
 
 /// Small bright spots away from the planet: (x, y, brightness).

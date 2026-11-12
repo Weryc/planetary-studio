@@ -85,7 +85,7 @@ pub fn instrument_body(ui: &mut Ui, view: InstrumentView, actions: &mut Vec<Inst
     let InstrumentView { setup, capture, analysis, wavelet } = view;
     let section = |ui: &mut Ui, title: &str| {
         ui.add_space(theme::space::L);
-        ui.label(RichText::new(title).size(theme::size::SMALL).strong().color(TEXT_WEAK));
+        ui.label(crate::widgets::caps(title));
         ui.add_space(theme::space::XS);
     };
 
@@ -138,7 +138,7 @@ pub fn instrument_body(ui: &mut Ui, view: InstrumentView, actions: &mut Vec<Inst
     if let Some(focal) = setup.focal_mm {
         ui.horizontal(|ui| {
             hint(ui, &tr!("Focale effettiva {focal:.0} mm, dal log.", "Effective focal length {focal:.0} mm, from the log."));
-            if ui.small_button(tl("Usa telescopio × Barlow")).clicked() {
+            if ui.button((ICON_RESTART_ALT.rich_text(), tl("Usa telescopio × Barlow"))).clicked() {
                 setup.focal_mm = None;
             }
         });
@@ -149,7 +149,7 @@ pub fn instrument_body(ui: &mut Ui, view: InstrumentView, actions: &mut Vec<Inst
     ui.add_space(theme::space::S);
     ui.horizontal(|ui| {
         if ui
-            .add(egui::Button::new((ICON_UPLOAD_FILE.rich_text().size(15.0), RichText::new(tl("Carica log…")))))
+            .add(egui::Button::new((ICON_UPLOAD_FILE.rich_text().size(theme::size::ICON_SMALL), RichText::new(tl("Carica log…")))))
             .on_hover_text(tl("FireCapture, SharpCap o AutoStakkert: camera, filtro, focale, data e drizzle"))
             .clicked()
         {
@@ -182,12 +182,12 @@ fn choose<T: PartialEq + Clone>(ui: &mut Ui, label: &str, value: &mut T, options
     });
 }
 
-/// [`choose`] for a catalogue with "Non indicato" and a custom entry.
 /// A catalogue name as shown (the Italian ones are translated; brand names stay).
 fn shown(name: &str) -> &str {
     ps_core::i18n::tl_dyn(name)
 }
 
+/// [`choose`] for a catalogue with "Non indicato" and a custom entry.
 fn choose_custom<T: PartialEq + Clone>(ui: &mut Ui, label: &str, value: &mut Option<T>, catalogue: Vec<T>, name_of: impl Fn(&T) -> &String, custom: impl Fn() -> T) {
     ui.horizontal(|ui| {
         label_cell(ui, label, 90.0);

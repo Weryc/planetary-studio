@@ -254,10 +254,19 @@ impl ToneStep {
     /// The whole step for one channel (0‥2) of a value, or for a mono image (`None`): for
     /// previews that need it value by value (e.g. a histogram as it will look).
     pub fn apply_value(&self, channel: Option<usize>, v: f32) -> f32 {
-        let master = self.map(&curve_lut(&self.curve), v);
-        match channel {
-            Some(c) => self.map_channel(c, &curve_lut(&self.channel_curves[c]), master),
-            None => master,
+        self.value_map()(channel, v)
+    }
+
+    /// [`Self::apply_value`] for many values: the curves' tables are built once, not per value.
+    pub fn value_map(&self) -> impl Fn(Option<usize>, f32) -> f32 + '_ {
+        let master = curve_lut(&self.curve);
+        let channels: [Vec<f32>; 3] = std::array::from_fn(|c| curve_lut(&self.channel_curves[c]));
+        move |channel, v| {
+            let common = self.map(&master, v);
+            match channel {
+                Some(c) => self.map_channel(c, &channels[c], common),
+                None => common,
+            }
         }
     }
 

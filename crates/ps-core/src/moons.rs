@@ -56,13 +56,19 @@ pub fn positions(body: Body, when: &Moment) -> Vec<MoonPosition> {
 
 /// Longitudes of Jupiter's central meridian, Systems I and II, degrees.
 pub fn jupiter_central_meridian(when: &Moment) -> (f64, f64) {
-    let (_, cm) = galilean(when.julian());
+    let (_, cm, _) = galilean(when.julian());
     cm
+}
+
+/// Planetocentric latitude of the Earth seen from Jupiter (the tilt of its axis towards us), degrees:
+/// positive when the north pole is tilted towards the Earth. Meeus ch. 43; within a few tenths of a degree.
+pub fn jupiter_tilt(when: &Moment) -> f64 {
+    galilean(when.julian()).2
 }
 
 const RAD: f64 = std::f64::consts::PI / 180.0;
 
-fn galilean(jd: f64) -> ([MoonPosition; 4], (f64, f64)) {
+fn galilean(jd: f64) -> ([MoonPosition; 4], (f64, f64), f64) {
     let d = jd - 2_451_545.0;
     let v = (172.74 + 0.00111588 * d) * RAD;
     let m = (357.529 + 0.9856003 * d) * RAD;
@@ -101,6 +107,7 @@ fn galilean(jd: f64) -> ([MoonPosition; 4], (f64, f64)) {
             moon("Callisto", u4 + 0.843 * RAD * h.sin(), 26.3627 - 0.1939 * h.cos()),
         ],
         (cm1, cm2),
+        de / RAD,
     )
 }
 
@@ -433,6 +440,15 @@ mod tests {
             // Saturn's position from Keplerian elements instead of VSOP87.
             let tol = 0.01 * f64::hypot(x, y).max(3.0);
             assert!((m.x - x).abs() < tol && (m.y - y).abs() < tol, "{}: {:.3} {:.3} vs {x} {y}", m.name, m.x, m.y);
+        }
+    }
+
+    /// Jupiter's tilt towards the Earth never passes about ±3.7° (its axis is nearly upright).
+    #[test]
+    fn tilt_stays_small() {
+        for month in 1..=12 {
+            let t = jupiter_tilt(&Moment { year: 2026, month, day: 15, hour: 0, minute: 0, second: 0.0 });
+            assert!(t.abs() < 4.0, "{t}");
         }
     }
 }

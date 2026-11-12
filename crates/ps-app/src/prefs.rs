@@ -2,8 +2,8 @@
 
 use ps_core::i18n::{Lang, tl};
 use ps_core::tr;
-use crate::theme::{ACCENT, BORDER, SUCCESS, TEXT, TEXT_WEAK};
-use crate::widgets::{segmented, toggle};
+use crate::theme::{self, ACCENT, BORDER, SUCCESS, TEXT, TEXT_WEAK};
+use crate::widgets::{caps, note, segmented, toggle};
 use eframe::egui::{self, RichText, Stroke};
 use egui_material_icons::MaterialIcon;
 use egui_material_icons::icons::*;
@@ -34,6 +34,10 @@ pub struct ModulePref {
 pub struct Preferences {
     /// In processing order.
     pub modules: Vec<ModulePref>,
+    /// What the open picture shows, as far as it is known (set from the document, not saved): the
+    /// cards that exist for one subject only (Jupiter's photometric colour) appear when it matches.
+    #[serde(skip)]
+    pub subject: Option<ps_core::capture::Body>,
     pub bxt_path: Option<PathBuf>,
     /// Also apply the automatic sharpening and noise settings when opening a file (the
     /// structural ones are always automatic).
@@ -74,10 +78,10 @@ pub struct Preferences {
     pub memory_saving: bool,
     /// While a slider is dragged, preview at reduced resolution (approximate, but fluid).
     pub fast_preview: bool,
-    /// How hard the automatic settings push.
     /// Free or classic wavelet scales, as last chosen in the wavelet panel.
     #[serde(default = "free_scales")]
     pub wavelet_scales: ps_core::wavelet::ScaleMode,
+    /// How hard the automatic settings push.
     pub auto_strength: ps_core::preset::AutoStrength,
     /// Use the graphics card for the heavy processing when there is a suitable one.
     #[serde(default = "yes")]
@@ -194,7 +198,7 @@ impl Group {
             Stage::Dering => Group::Corrections,
             Stage::Denoise => Group::Noise,
             Stage::Tone | Stage::Curves => Group::Tone,
-            Stage::Align | Stage::Color | Stage::Mineral | Stage::SunColor => Group::Color,
+            Stage::Align | Stage::PhotoColor | Stage::Color | Stage::Mineral | Stage::SunColor => Group::Color,
             Stage::Rings | Stage::Moons | Stage::Layers => Group::Regions,
         }
     }
@@ -207,6 +211,8 @@ pub const GROUP_ORDER: [Group; 6] = [Group::Sharpness, Group::Corrections, Group
 pub fn relevant(stage: Stage, kind: ImageKind, mono: bool) -> bool {
     match stage {
         Stage::Align | Stage::Color => !mono,
+        // Jupiter's bands: needs the subject to be known as Jupiter too (see `Preferences::subject`).
+        Stage::PhotoColor => !mono && kind == ImageKind::Planet,
         Stage::Mineral => !mono && matches!(kind, ImageKind::FullDisk | ImageKind::Surface),
         // Solar frames are full disks or close-ups.
         Stage::SunColor => matches!(kind, ImageKind::FullDisk | ImageKind::Surface),
@@ -230,6 +236,7 @@ impl Default for Preferences {
             (Stage::Dering, Visible),
             (Stage::Tone, Visible),
             (Stage::Curves, Visible),
+            (Stage::PhotoColor, Visible),
             (Stage::Color, Visible),
             (Stage::Layers, Visible),
             (Stage::Mineral, Visible),
@@ -240,6 +247,7 @@ impl Default for Preferences {
         .collect();
         Self {
             modules,
+            subject: None,
             bxt_path: ps_core::bxt::find_executable(),
             auto_settings: false,
             auto_structure: true,
@@ -280,6 +288,7 @@ pub fn stage_icon(stage: Stage) -> MaterialIcon {
         Stage::Dering => ICON_FLARE,
         Stage::Tone => ICON_TUNE,
         Stage::Curves => ICON_SHOW_CHART,
+        Stage::PhotoColor => ICON_COLORIZE,
         Stage::Color => ICON_PALETTE,
         Stage::Layers => ICON_LAYERS,
         Stage::Mineral => ICON_NIGHTLIGHT,
@@ -320,6 +329,10 @@ impl Preferences {
 
     /// Shown in the panel for this image: not hidden and, if adapting, relevant.
     fn shown(&self, stage: Stage, kind: ImageKind, mono: bool) -> bool {
+        // Only for a colour picture of Jupiter, whatever the "adapt to the image" setting says.
+        if stage == Stage::PhotoColor && (mono || self.subject != Some(ps_core::capture::Body::Jupiter)) {
+            return false;
+        }
         self.visibility(stage) != Visibility::Hidden && (!self.adapt_to_image || relevant(stage, kind, mono))
     }
 
@@ -382,6 +395,7 @@ impl Preferences {
                     p.layers.iter_mut().for_each(|l| l.color.enabled = false);
                 }
                 Stage::Layers => p.layers.iter_mut().for_each(|l| l.enabled = false),
+                Stage::PhotoColor => p.photocolor.enabled = false,
                 Stage::Mineral => p.mineral.enabled = false,
                 Stage::SunColor => p.suncolor.enabled = false,
                 Stage::Dering => p.dering.enabled = false,
@@ -416,12 +430,13 @@ impl SettingsWindow {
             self.check_result = Some(result);
             self.check = None;
         }
-        let frame = egui::Frame::new().fill(crate::theme::PANEL).corner_radius(12).inner_margin(20).stroke(Stroke::new(1.0, BORDER));
+        // Same corners, border and title size as the other windows; modal, unlike them.
+        let frame = egui::Frame::new().fill(crate::theme::PANEL).corner_radius(theme::radius::WINDOW).inner_margin(20).stroke(Stroke::new(1.0, BORDER));
         let response = egui::Modal::new(egui::Id::unique("settings")).frame(frame).show(ctx, |ui| {
             ui.set_width(520.0);
             ui.horizontal(|ui| {
-                ui.label(ICON_SETTINGS.rich_text().size(20.0).color(ACCENT));
-                ui.label(RichText::new(tl("Impostazioni")).size(17.0).strong().color(TEXT));
+                ui.label(ICON_SETTINGS.rich_text().size(theme::size::ICON).color(ACCENT));
+                ui.label(RichText::new(tl("Impostazioni")).size(theme::size::HEADING).strong().color(TEXT));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if crate::widgets::icon_button(ui, ICON_CLOSE, tl("Chiudi (Esc)")).clicked() {
                         self.open = false;
@@ -465,7 +480,7 @@ impl SettingsWindow {
                     toggle(ui, &mut prefs.use_gpu);
                     ui.label(tl("Usa la scheda grafica (GPU)"));
                 });
-                hint(
+                note(
                     ui,
                     &match ps_core::gpu::status() {
                         None => tl("Ricerca della GPU in corso…").to_string(),
@@ -482,12 +497,12 @@ impl SettingsWindow {
                     toggle(ui, &mut prefs.fast_preview);
                     ui.label(tl("Anteprima rapida mentre muovi un cursore"));
                 });
-                hint(ui, tl("Durante il trascinamento elabora l'immagine ridotta (approssimata); al rilascio torna a piena risoluzione."));
+                note(ui, tl("Durante il trascinamento elabora l'immagine ridotta (approssimata); al rilascio torna a piena risoluzione."));
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.memory_saving);
                     ui.label(tl("Risparmia memoria"));
                 });
-                hint(ui, tl("Tiene in memoria solo i passi lenti (deconvoluzione, rumore, wavelet…) e ricalcola quelli rapidi. Utile con immagini grandi e poca RAM."));
+                note(ui, tl("Tiene in memoria solo i passi lenti (deconvoluzione, rumore, wavelet…) e ricalcola quelli rapidi. Utile con immagini grandi e poca RAM."));
                 ui.add_space(14.0);
                 section(ui, tl("PANNELLO"));
                 ui.horizontal(|ui| {
@@ -509,7 +524,7 @@ impl SettingsWindow {
         ui.spacing_mut().item_spacing.y = 4.0;
         for stage in stages {
             ui.horizontal(|ui| {
-                ui.label(stage_icon(stage).rich_text().size(18.0).color(TEXT_WEAK));
+                ui.label(stage_icon(stage).rich_text().size(theme::size::ICON).color(TEXT_WEAK));
                 ui.label(RichText::new(stage.name()).color(TEXT));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut v = prefs.visibility(stage);
@@ -590,12 +605,8 @@ impl SettingsWindow {
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).small().strong().color(TEXT_WEAK));
+    ui.label(caps(title));
     ui.add_space(4.0);
-}
-
-fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.add(egui::Label::new(RichText::new(text).small().color(TEXT_WEAK)).wrap());
 }
 
 fn first_lines(text: &str) -> String {
@@ -629,6 +640,41 @@ mod tests {
             assert_eq!(Group::Corrections.label(), "Artefact correction");
             assert_eq!(Group::Identify.name(), "Identifica e annota");
         });
+    }
+
+    /// Jupiter's photometric colour exists only for a colour picture whose subject is Jupiter.
+    #[test]
+    fn photometric_colour_needs_jupiter_in_colour() {
+        use ps_core::capture::Body;
+        let mut p = Preferences::default();
+        p.modules.iter_mut().for_each(|m| m.visibility = Visibility::Visible);
+        assert!(!shown(&p, ImageKind::Planet, false).contains(&Stage::PhotoColor), "no subject known");
+        p.subject = Some(Body::Mars);
+        assert!(!shown(&p, ImageKind::Planet, false).contains(&Stage::PhotoColor));
+        p.subject = Some(Body::Jupiter);
+        assert!(shown(&p, ImageKind::Planet, false).contains(&Stage::PhotoColor));
+        assert!(!shown(&p, ImageKind::Planet, true).contains(&Stage::PhotoColor), "mono");
+        // Even with "adapt to the image" off.
+        p.adapt_to_image = false;
+        assert!(!shown(&p, ImageKind::Planet, true).contains(&Stage::PhotoColor));
+        // Switched on it is dropped from the processed pipeline when the subject isn't Jupiter.
+        let mut pipeline = Pipeline::default();
+        pipeline.photocolor.enabled = true;
+        p.subject = Some(Body::Saturn);
+        assert!(!p.effective(&pipeline, ImageKind::Saturn, false).photocolor.enabled);
+        p.subject = Some(Body::Jupiter);
+        assert!(p.effective(&pipeline, ImageKind::Planet, false).photocolor.enabled);
+    }
+
+    /// Settings saved by the first versions of the photometric colour still read.
+    #[test]
+    fn old_photometric_references_still_read() {
+        use ps_core::photocolor::{PhotoColorParams, Reference};
+        let old: PhotoColorParams = serde_json::from_str(r#"{"reference":"HubbleNatural2019","strength":0.5}"#).unwrap();
+        assert_eq!((old.reference, old.strength, old.tilt), (Reference::Hubble2019, 0.5, 0.0));
+        let older: PhotoColorParams = serde_json::from_str(r#"{"reference":"Hubble2019"}"#).unwrap();
+        assert_eq!(older.reference, Reference::Hubble2019);
+        assert_eq!(older.strength, 1.0, "switched on, it starts at full strength");
     }
 
     #[test]

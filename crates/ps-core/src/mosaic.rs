@@ -378,8 +378,14 @@ pub fn arrange(planes: &[Option<&Plane>], report: &(dyn Fn(usize, usize) + Sync)
 
 /// Every overlapping pair (first index lower) with the second frame's placement on the first.
 pub fn match_all(planes: &[Option<&Plane>], report: &(dyn Fn(usize, usize) + Sync)) -> Vec<((usize, usize), PairMatch)> {
+    match_from(planes, 0, report)
+}
+
+/// Like `match_all`, but only the pairs whose second frame is `from` or later: the overlaps of
+/// frames just added, with each other and with those already there.
+pub fn match_from(planes: &[Option<&Plane>], from: usize, report: &(dyn Fn(usize, usize) + Sync)) -> Vec<((usize, usize), PairMatch)> {
     let n = planes.len();
-    let pairs: Vec<(usize, usize)> = (0..n).flat_map(|i| (i + 1..n).map(move |j| (i, j))).filter(|&(i, j)| planes[i].is_some() && planes[j].is_some()).collect();
+    let pairs: Vec<(usize, usize)> = (0..n).flat_map(|i| (from.max(i + 1)..n).map(move |j| (i, j))).filter(|&(i, j)| planes[i].is_some() && planes[j].is_some()).collect();
     let done = std::sync::atomic::AtomicUsize::new(0);
     pairs
         .par_iter()
@@ -394,11 +400,19 @@ pub fn match_all(planes: &[Option<&Plane>], report: &(dyn Fn(usize, usize) + Syn
 /// Placements of the `enabled` frames from their pairwise `matches`: the best overlaps form a
 /// tree from the first enabled frame (maximum spanning tree, Prim).
 pub fn tree(enabled: &[bool], matches: &[((usize, usize), PairMatch)]) -> Vec<Option<Placement>> {
-    let mut placed: Vec<Option<Placement>> = vec![None; enabled.len()];
-    let Some(root) = enabled.iter().position(|&e| e) else {
-        return placed;
-    };
-    placed[root] = Some(Placement::IDENTITY);
+    extend(enabled, matches, vec![None; enabled.len()])
+}
+
+/// Places the enabled frames still without a placement from those that have one, following
+/// the best overlaps; frames already placed stay where they are. With none placed, the first
+/// enabled frame is the reference.
+pub fn extend(enabled: &[bool], matches: &[((usize, usize), PairMatch)], mut placed: Vec<Option<Placement>>) -> Vec<Option<Placement>> {
+    if !placed.iter().zip(enabled).any(|(p, &e)| e && p.is_some()) {
+        let Some(root) = enabled.iter().position(|&e| e) else {
+            return placed;
+        };
+        placed[root] = Some(Placement::IDENTITY);
+    }
     loop {
         let next = matches
             .iter()

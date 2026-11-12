@@ -41,6 +41,8 @@ pub struct Request {
     pub max_texture_side: usize,
     /// LRGB luminance at the source's size, with its generation.
     pub luminance: Option<Plane>,
+    /// The names laid over the finished image: red, green, blue, coverage (source's size).
+    pub overlay: Option<[Plane; 4]>,
     pub bxt_executable: Option<PathBuf>,
     /// Layer whose mask should be returned as an overlay for display.
     pub mask_overlay: Option<u64>,
@@ -61,6 +63,8 @@ pub struct Request {
 pub struct Output {
     pub source_gen: u64,
     pub pipeline: Pipeline,
+    /// Generation of the names laid over the image, if any.
+    pub overlay_gen: Option<u64>,
     pub roi: Option<Roi>,
     /// Processed pixels: the whole image, or just the ROI.
     pub image: Arc<Image>,
@@ -91,8 +95,11 @@ pub struct Output {
     pub clip_overlay: Option<(Arc<ColorImage>, usize)>,
     /// The smart sharpening's map (same region as `image`) and, for the resolution, the
     /// periods (px) its colours span.
-    pub smart_overlay: Option<(Arc<ColorImage>, Option<(f32, f32)>)>,
+    pub smart_overlay: Option<SmartOverlay>,
 }
+
+/// The smart sharpening's map and, for the resolution, the periods (px) its colours span.
+pub type SmartOverlay = (Arc<ColorImage>, Option<(f32, f32)>);
 
 /// A layer mask in miniature: white where it applies.
 #[derive(Clone)]
@@ -413,7 +420,7 @@ impl WorkerThread {
             Input::Roi(c) => Some(c),
             _ => None,
         };
-        let (input, input_gen, masks, luminance) = match input {
+        let (input, input_gen, masks, luminance, overlay) = match input {
             Input::Proxy(c) => {
                 let f = c.factor;
                 pipeline = pipeline.downscaled(f);
@@ -423,7 +430,8 @@ impl WorkerThread {
                 });
                 let masks: Vec<_> = masks.collect();
                 let luminance = req.luminance.as_ref().map(|(plane, g)| self.proxy_plane(plane, *g, full_w, full_h, f));
-                (Arc::clone(&c.image), c.generation, masks, luminance)
+                let overlay = req.overlay.as_ref().map(|o| o.each_ref().map(|(plane, g)| self.proxy_plane(plane, *g, full_w, full_h, f)));
+                (Arc::clone(&c.image), c.generation, masks, luminance, overlay)
             }
             Input::Roi(c) => {
                 let masks = full_masks.iter().map(|(id, plane, g)| {
@@ -432,11 +440,12 @@ impl WorkerThread {
                 });
                 let masks: Vec<_> = masks.collect();
                 let luminance = req.luminance.as_ref().map(|(plane, g)| self.roi_plane(plane, *g, full_w, c.region, c.roi));
-                (Arc::clone(&c.image), c.generation, masks, luminance)
+                let overlay = req.overlay.as_ref().map(|o| o.each_ref().map(|(plane, g)| self.roi_plane(plane, *g, full_w, c.region, c.roi)));
+                (Arc::clone(&c.image), c.generation, masks, luminance, overlay)
             }
-            Input::Full => (Arc::clone(&req.source), req.source_gen, full_masks.clone(), req.luminance.clone()),
+            Input::Full => (Arc::clone(&req.source), req.source_gen, full_masks.clone(), req.luminance.clone(), req.overlay.clone()),
         };
-        let aux = Aux { masks: &masks, luminance, bxt_executable: req.bxt_executable.as_deref(), ringing_map: req.ringing_map, smart_view: req.smart_view };
+        let aux = Aux { masks: &masks, luminance, overlay, bxt_executable: req.bxt_executable.as_deref(), ringing_map: req.ringing_map, smart_view: req.smart_view };
         // What the clipping warning compares with.
         let unprocessed = Arc::clone(&input);
         let out = processor.run(input, input_gen, &pipeline, &aux, cancel, report)?;
@@ -447,27 +456,25 @@ impl WorkerThread {
         // Without applied tone steps the tone input is the output itself: one histogram serves both.
         let same = Arc::ptr_eq(&out.image, &out.tone_input);
         let (curves_like_tone, curves_like_image) = (Arc::ptr_eq(&out.curves_input, &out.tone_input), Arc::ptr_eq(&out.curves_input, &out.image));
-        let ringing_overlay = out.ringing.as_ref().map(|m| {
-            let (w, h) = (out.image.width(), out.image.height());
-            let full = Image::new(w, h, vec![m.to_vec()], 16);
-            let map = to_region(Arc::new(full));
-            Arc::new(heat_overlay(&map.channels()[0], map.width(), map.height(), req.max_texture_side, [255, 60, 230], 0.004, 0.03))
-        });
-        let smart_overlay = out.smart_map.as_ref().map(|map| {
-            let (w, h) = (out.image.width(), out.image.height());
-            let crop = |plane: &[f32]| to_region(Arc::new(Image::new(w, h, vec![plane.to_vec()], 16)));
-            match map.as_ref() {
-                SmartMap::HoldBack { zones, edges, excluded } => {
-                    let (zones, edges, excluded) = (crop(zones), crop(edges), excluded.as_ref().map(|e| crop(e)));
-                    let excluded = excluded.as_ref().map(|e| e.channels()[0].as_slice());
-                    let overlay = hold_back_overlay(&zones.channels()[0], &edges.channels()[0], excluded, zones.width(), zones.height(), req.max_texture_side);
-                    (Arc::new(overlay), None)
-                }
-                SmartMap::Resolution(periods) => {
-                    let periods = crop(periods);
-                    let range = resolution_range(&periods.channels()[0]);
-                    (Arc::new(resolution_overlay(&periods.channels()[0], periods.width(), periods.height(), req.max_texture_side, range)), Some(range))
-                }
+        // The maps cover what was processed: cut to the region shown (a copy only for a ROI).
+        let processed_w = out.image.width();
+        let window = match (req.roi, roi_input) {
+            (Some(roi), Some(c)) => Some(Roi { x: roi.x - c.region.x, y: roi.y - c.region.y, w: roi.w, h: roi.h }),
+            _ => None,
+        };
+        let (w, h) = window.map_or((processed_w, out.image.height()), |r| (r.w, r.h));
+        let side = req.max_texture_side;
+        let ringing_overlay = out.ringing.as_ref().map(|m| Arc::new(heat_overlay(&plane_window(m, processed_w, window), w, h, side, [255, 60, 230], 0.004, 0.03)));
+        let smart_overlay = out.smart_map.as_ref().map(|map| match map.as_ref() {
+            SmartMap::HoldBack { zones, edges, excluded } => {
+                let excluded = excluded.as_ref().map(|e| plane_window(e, processed_w, window));
+                let overlay = hold_back_overlay(&plane_window(zones, processed_w, window), &plane_window(edges, processed_w, window), excluded.as_deref(), w, h, side);
+                (Arc::new(overlay), None)
+            }
+            SmartMap::Resolution(periods) => {
+                let periods = plane_window(periods, processed_w, window);
+                let range = resolution_range(&periods);
+                (Arc::new(resolution_overlay(&periods, w, h, side, range)), Some(range))
             }
         });
         let image = to_region(out.image);
@@ -511,6 +518,7 @@ impl WorkerThread {
         Some(Output {
             source_gen: req.source_gen,
             pipeline: req.pipeline,
+            overlay_gen: req.overlay.as_ref().map(|o| o[3].1),
             roi: req.roi,
             image,
             display,
@@ -530,6 +538,14 @@ impl WorkerThread {
             clip_overlay,
             smart_overlay,
         })
+    }
+}
+
+/// `plane` (rows of `w`) cut to `window`; the plane itself when there is no window.
+fn plane_window(plane: &[f32], w: usize, window: Option<Roi>) -> std::borrow::Cow<'_, [f32]> {
+    match window {
+        Some(r) => (r.y..r.y + r.h).flat_map(|y| plane[y * w + r.x..y * w + r.x + r.w].iter().copied()).collect(),
+        None => plane.into(),
     }
 }
 
@@ -745,4 +761,17 @@ fn mask_overlay(plane: &[f32], w: usize, h: usize, max_side: usize) -> ColorImag
         })
         .collect();
     ColorImage::new([dw, dh], pixels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The overlays' planes are borrowed whole and copied only for a ROI.
+    #[test]
+    fn plane_window_borrows_the_whole_plane_and_copies_a_region() {
+        let plane: Vec<f32> = (0..12).map(|i| i as f32).collect();
+        assert!(matches!(plane_window(&plane, 4, None), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(plane_window(&plane, 4, Some(Roi { x: 1, y: 1, w: 2, h: 2 })).as_ref(), [5.0, 6.0, 9.0, 10.0]);
+    }
 }

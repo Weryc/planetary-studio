@@ -10,6 +10,7 @@ mod naming;
 mod panels;
 mod prefs;
 mod resize_ui;
+mod smart_compare;
 mod theme;
 mod viewer;
 mod widgets;

@@ -3,8 +3,8 @@
 
 use ps_core::i18n::tl;
 use ps_core::tr;
-use crate::theme::{self, ACCENT, BORDER, TEXT, TEXT_WEAK};
-use crate::widgets::{ParamSlider, toggle};
+use crate::theme::{self, ACCENT, TEXT, TEXT_WEAK};
+use crate::widgets::{ParamSlider, caps, primary_button, toggle};
 use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, Vec2};
 use egui_material_icons::icons::*;
 use ps_core::Image;
@@ -25,6 +25,10 @@ enum Job {
     Loaded(Vec<Result<Arc<Image>, String>>),
     Progress(String),
     Matched(Vec<((usize, usize), PairMatch)>),
+    /// Frames added to those already there, in order.
+    Added(Vec<Result<Arc<Image>, String>>),
+    /// The overlaps of the added frames.
+    MatchedAdded(Vec<((usize, usize), PairMatch)>),
 }
 
 pub struct MosaicEditor {
@@ -105,6 +109,34 @@ impl MosaicEditor {
         });
     }
 
+    /// Adds frames after those already there and places them from their overlaps: the others
+    /// keep their placements (moved by hand too) and whether they are left out.
+    fn add(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let from = self.mosaic.tiles.len();
+        self.mosaic.tiles.extend(Mosaic::new(paths.clone()).tiles);
+        self.busy = Some(tr!("Caricamento di {} immagini…", "Loading {} images…", paths.len()));
+        let (tx, ctx, mut images) = (self.tx.clone(), ctx.clone(), self.images.clone());
+        std::thread::spawn(move || {
+            let added: Vec<Result<Arc<Image>, String>> =
+                paths.iter().map(|p| ps_io::load(p).map(Arc::new).map_err(|e| format!("{}: {e}", p.file_name().and_then(|n| n.to_str()).unwrap_or("?")))).collect();
+            images.extend(added.iter().map(|r| r.as_ref().ok().cloned()));
+            tx.send(Job::Added(added)).ok();
+            ctx.request_repaint();
+            tx.send(Job::Progress(tl("Allineamento…").into())).ok();
+            let planes: Vec<Option<Plane>> = images.iter().map(|i| i.as_deref().map(Plane::luminance)).collect();
+            let refs: Vec<Option<&Plane>> = planes.iter().map(Option::as_ref).collect();
+            let report = |done: usize, total: usize| {
+                tx.send(Job::Progress(tr!("Allineamento: coppia {done} di {total}…", "Aligning: pair {done} of {total}…"))).ok();
+                ctx.request_repaint();
+            };
+            tx.send(Job::MatchedAdded(mosaic::match_from(&refs, from, &report))).ok();
+            ctx.request_repaint();
+        });
+    }
+
     fn realign(&mut self, ctx: &egui::Context) {
         self.busy = Some(tl("Allineamento…").into());
         let (tx, ctx, images) = (self.tx.clone(), ctx.clone(), self.images.clone());
@@ -164,6 +196,20 @@ impl MosaicEditor {
                     self.busy = None;
                     self.arrange();
                 }
+                Job::Added(images) => {
+                    self.errors.extend(images.iter().filter_map(|r| r.as_ref().err().cloned()));
+                    self.images.extend(images.into_iter().map(Result::ok));
+                }
+                Job::MatchedAdded(matches) => {
+                    self.matches.extend(matches);
+                    self.busy = None;
+                    let enabled: Vec<bool> = self.mosaic.tiles.iter().zip(&self.images).map(|(t, i)| t.enabled && i.is_some()).collect();
+                    let placed = self.mosaic.tiles.iter().map(|t| t.placement).collect();
+                    for (tile, p) in self.mosaic.tiles.iter_mut().zip(mosaic::extend(&enabled, &self.matches, placed)) {
+                        tile.placement = p;
+                    }
+                    self.update_gains();
+                }
             }
         }
     }
@@ -199,12 +245,10 @@ impl MosaicEditor {
         }
         let mut outcome = None;
         let mut open = self.open;
-        egui::Window::new(RichText::new(tl("Mosaico")).strong())
+        crate::widgets::window(ctx, tl("Mosaico"))
             .open(&mut open)
             .default_size([1000.0, 640.0])
             .min_size([700.0, 420.0])
-            .collapsible(false)
-            .frame(egui::Frame::window(&ctx.global_style()).fill(theme::PANEL).stroke(Stroke::new(1.0, BORDER)))
             .show(ctx, |ui| {
                 egui::Panel::right("mosaic-side").resizable(false).exact_size(300.0).frame(egui::Frame::NONE.inner_margin(egui::Margin { left: 12, ..Default::default() })).show(ui, |ui| {
                     outcome = self.side(ui);
@@ -218,14 +262,14 @@ impl MosaicEditor {
 
     fn side(&mut self, ui: &mut egui::Ui) -> Option<MosaicOutcome> {
         let mut outcome = None;
-        ui.label(RichText::new(tl("IMMAGINI")).size(theme::size::SMALL).strong().color(TEXT_WEAK));
+        ui.label(caps(tl("IMMAGINI")));
         crate::panels::hint(ui, tl("Fotogrammi dello stesso soggetto con la stessa focale, che si sovrappongono un po'. Trascina un riquadro nell'anteprima per ritoccarne la posizione."));
         let mut changed = false;
         egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
             for (i, tile) in self.mosaic.tiles.iter_mut().enumerate() {
                 let loaded = self.images.get(i).is_some_and(Option::is_some);
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(loaded, egui::Checkbox::without_text(&mut tile.enabled)).changed() {
+                    if ui.add_enabled_ui(loaded, |ui| toggle(ui, &mut tile.enabled)).inner.changed() {
                         changed = true;
                     }
                     let name = tile.path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
@@ -255,16 +299,17 @@ impl MosaicEditor {
         }
         ui.add_space(theme::space::S);
         ui.horizontal(|ui| {
-            if ui.button((ICON_ADD.rich_text(), tl("Aggiungi…"))).clicked()
+            // Not while loading or aligning: the new frames go after a complete list.
+            if ui.add_enabled(self.busy.is_none(), egui::Button::new((ICON_ADD.rich_text(), tl("Aggiungi…")))).clicked()
                 && let Some(more) = rfd::FileDialog::new().set_title(tl("Aggiungi immagini al mosaico")).add_filter(tl("Immagini"), ps_io::READ_EXTENSIONS).pick_files()
             {
-                let mut paths: Vec<PathBuf> = self.mosaic.tiles.iter().map(|t| t.path.clone()).collect();
-                let new: Vec<PathBuf> = more.into_iter().filter(|p| !paths.contains(p)).collect();
-                paths.extend(new);
-                let editing_open = self.editing_open;
-                let params = self.mosaic.params.clone();
-                self.start(ui.ctx(), paths);
-                (self.editing_open, self.mosaic.params) = (editing_open, params);
+                let mut new: Vec<PathBuf> = Vec::new();
+                for p in more {
+                    if !self.mosaic.tiles.iter().any(|t| t.path == p) && !new.contains(&p) {
+                        new.push(p);
+                    }
+                }
+                self.add(ui.ctx(), new);
             }
             if ui.add_enabled(self.busy.is_none() && !self.images.is_empty(), egui::Button::new((ICON_AUTO_FIX_HIGH.rich_text(), tl("Riallinea")))).on_hover_text(tl("Ritrova automaticamente le posizioni (i ritocchi a mano si perdono)")).clicked() {
                 self.realign(ui.ctx());
@@ -272,7 +317,7 @@ impl MosaicEditor {
         });
 
         ui.add_space(theme::space::M);
-        ui.label(RichText::new(tl("UNIONE")).size(theme::size::SMALL).strong().color(TEXT_WEAK));
+        ui.label(caps(tl("UNIONE")));
         let p = &mut self.mosaic.params;
         let before = p.clone();
         ParamSlider::new(tl("Sfumatura bordi"), &mut p.feather, 0.0..=400.0, 80.0).decimals(0).suffix(" px").help(tl("Su quanti pixel un'immagine sfuma nell'altra: più ampia nasconde meglio le giunture")).show(ui);
@@ -296,16 +341,17 @@ impl MosaicEditor {
             });
         }
         let ready = self.busy.is_none() && self.mosaic.tiles.iter().zip(&self.images).filter(|(t, i)| t.enabled && i.is_some() && t.placement.is_some()).count() >= 1;
-        let black = Color32::BLACK;
         let label = if self.editing_open { tl("Aggiorna il mosaico") } else { tl("Crea il mosaico") };
-        let create = egui::Button::new((ICON_CHECK.rich_text().color(black), RichText::new(label).color(black).strong())).fill(ACCENT).min_size(Vec2::new(ui.available_width(), 32.0));
+        let create = primary_button(Some(ICON_CHECK), label).min_size(Vec2::new(ui.available_width(), 32.0));
         if ui.add_enabled(ready, create).on_hover_text(tl("Unisce le immagini a piena risoluzione e le apre per l'elaborazione; il mosaico resta modificabile (File › Modifica mosaico)")).clicked() {
             outcome = Some(MosaicOutcome::Create { mosaic: self.mosaic.clone(), images: self.images.clone(), keep_settings: self.editing_open });
             self.open = false;
         }
         ui.add_space(theme::space::S);
-        if ui.add_enabled(ready, egui::Button::new((ICON_SAVE.rich_text(), tl("Salva mosaico…"))).min_size(Vec2::new(ui.available_width(), 26.0))).on_hover_text(tl("Salva l'elenco delle immagini e le loro posizioni, per riaprire il mosaico in seguito")).clicked() {
-            save(&self.mosaic);
+        if ui.add_enabled(ready, egui::Button::new((ICON_SAVE.rich_text(), tl("Salva mosaico…"))).min_size(Vec2::new(ui.available_width(), 26.0))).on_hover_text(tl("Salva l'elenco delle immagini e le loro posizioni, per riaprire il mosaico in seguito")).clicked()
+            && let Err(e) = save(&self.mosaic)
+        {
+            self.errors.push(tr!("Mosaico non salvato: {e}", "Mosaic not saved: {e}"));
         }
         outcome
     }
@@ -379,19 +425,18 @@ impl MosaicEditor {
     }
 }
 
-/// Ask where and save the mosaic's description (`.psmosaic`, JSON).
-fn save(mosaic: &Mosaic) {
+/// Ask where and save the mosaic's description (`.psmosaic`, JSON). `Ok` also when the user
+/// gives up.
+fn save(mosaic: &Mosaic) -> Result<(), String> {
     let stem = mosaic.tiles.first().and_then(|t| t.path.file_stem()).and_then(|s| s.to_str()).unwrap_or(tl("mosaico"));
     let dir = mosaic.tiles.first().and_then(|t| t.path.parent().map(PathBuf::from));
     let mut dialog = rfd::FileDialog::new().set_title(tl("Salva mosaico")).set_file_name(tr!("{stem}_mosaico.psmosaic", "{stem}_mosaic.psmosaic")).add_filter(tl("Mosaico Planetary Studio"), &["psmosaic"]);
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
-    if let Some(path) = dialog.save_file()
-        && let Ok(json) = serde_json::to_string_pretty(mosaic)
-    {
-        std::fs::write(path, json).ok();
-    }
+    let Some(path) = dialog.save_file() else { return Ok(()) };
+    let json = serde_json::to_string_pretty(mosaic).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
 }
 
 /// A saved mosaic (`.psmosaic`).

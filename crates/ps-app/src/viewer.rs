@@ -3,7 +3,7 @@
 
 use ps_core::i18n::tl;
 use ps_core::tr;
-use crate::theme::{ACCENT, BG, TEXT};
+use crate::theme::{self, ACCENT, BG, TEXT};
 use crate::worker::Roi;
 use eframe::egui::{
     self, Color32, ColorImage, CornerRadius, CursorIcon, FontId, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind,
@@ -741,8 +741,8 @@ fn crop_bar(ui: &mut egui::Ui, canvas: Rect, straighten: &mut f32) -> Option<Cro
     let area = Rect::from_center_size(pos2(canvas.center().x, canvas.bottom() - 36.0), size);
     let mut action = None;
     ui.scope_builder(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-        egui::Frame::new().fill(Color32::from_black_alpha(210)).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
-            let tool = |ui: &mut egui::Ui, icon: egui_material_icons::MaterialIcon, tip: &str| ui.add(egui::Button::new(icon.rich_text().size(18.0)).frame(false)).on_hover_text(tip).clicked();
+        egui::Frame::new().fill(Color32::from_black_alpha(210)).corner_radius(CornerRadius::same(theme::radius::WINDOW)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+            let tool = |ui: &mut egui::Ui, icon: egui_material_icons::MaterialIcon, tip: &str| ui.add(egui::Button::new(icon.rich_text().size(theme::size::ICON)).frame(false)).on_hover_text(tip).clicked();
             if tool(ui, ICON_ROTATE_LEFT, tl("Ruota di 90° in senso antiorario")) {
                 action = Some(CropAction::Rotate(-1));
             }
@@ -756,17 +756,17 @@ fn crop_bar(ui: &mut egui::Ui, canvas: Rect, straighten: &mut f32) -> Option<Cro
                 action = Some(CropAction::Flip { horizontal: false });
             }
             ui.add(egui::Separator::default().vertical());
-            ui.label(ICON_STRAIGHTEN.rich_text().size(16.0)).on_hover_text(tl("Raddrizza"));
+            ui.label(ICON_STRAIGHTEN.rich_text().size(theme::size::ICON)).on_hover_text(tl("Raddrizza"));
             ui.spacing_mut().slider_width = 130.0;
             let slider = ui.add(egui::Slider::new(straighten, -45.0..=45.0).fixed_decimals(1).suffix("°"));
             if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                 action = Some(CropAction::Straighten(*straighten));
             }
             ui.add(egui::Separator::default().vertical());
-            if ui.add(egui::Button::new(tl("Annulla")).min_size(Vec2::new(80.0, 26.0))).on_hover_text("Esc").clicked() {
+            if ui.add(egui::Button::new(tr!("Annulla", "Cancel")).min_size(Vec2::new(80.0, 26.0))).on_hover_text("Esc").clicked() {
                 action = Some(CropAction::Cancel);
             }
-            let apply = egui::Button::new(egui::RichText::new(tl("Applica ritaglio")).color(Color32::BLACK).strong()).fill(ACCENT).min_size(Vec2::new(130.0, 26.0));
+            let apply = crate::widgets::primary_button(None, tl("Applica ritaglio")).min_size(Vec2::new(130.0, 26.0));
             if ui.add(apply).on_hover_text(tl("Invio")).clicked() {
                 action = Some(CropAction::Apply);
             }

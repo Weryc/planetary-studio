@@ -49,6 +49,7 @@ pub fn module_tag(stage: Stage) -> &'static str {
         Stage::Dering => "dering",
         Stage::Tone => tl("livelli"),
         Stage::Curves => tl("curve"),
+        Stage::PhotoColor => tl("colore-fotometrico"),
         Stage::Color => tl("colore"),
         Stage::Layers => tl("maschere"),
         Stage::Mineral => "mineral",

@@ -6,7 +6,7 @@ use crate::panels::{self, BrushSettings, LayerTemplate, LayerTool, LayerUi, Mask
 use crate::prefs::{self as prefs_group, Preferences, SettingsWindow};
 use crate::theme::{self, ACCENT, BORDER, TEXT, TEXT_WEAK};
 use crate::viewer::{BrushView, Compare, CropAction, Overlay, ShapeKind, Tool, Viewer};
-use crate::widgets::{Histogram, icon_button, segmented, tool_button};
+use crate::widgets::{Histogram, caps, icon_button, primary_button, segmented, tool_button};
 use crate::worker::{self, Output, Request, Roi, Worker};
 use eframe::egui::{self, ColorImage, Key, KeyboardShortcut, Modifiers, Pos2, Rect, RichText, Stroke, Vec2};
 use egui_material_icons::icons::*;
@@ -31,15 +31,15 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
-const EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
-const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+pub(crate) const EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
+pub(crate) const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
 const REDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
 /// The platform's standard shortcut for preferences (⌘, on macOS, Ctrl+, elsewhere).
 const SETTINGS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
 const FIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F);
 const ACTUAL_SIZE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1);
 /// Export next to the original, in the last format used.
-const QUICK_EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::E);
+pub(crate) const QUICK_EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::E);
 /// Keys 1‥5 pick the panel's areas.
 const AREA_KEYS: [Key; 6] = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
 const TOGGLE_ROI: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::R);
@@ -86,6 +86,8 @@ struct Document {
     /// Current type: the detected one unless the user picked another.
     kind: ImageKind,
     luminance: Option<Luminance>,
+    /// The names and marks from «Identifica», laid over the finished image.
+    annotation: Option<Annotation>,
     /// Base name of exported files (the original's unless edited).
     export_name: String,
     /// The frames this image was joined from, and how.
@@ -118,6 +120,25 @@ fn short_psf(psf: &ps_core::psf::Psf) -> &'static str {
         ps_core::psf::Psf::Moffat { .. } => "Moffat",
         ps_core::psf::Psf::Airy { .. } => "Airy",
         ps_core::psf::Psf::Measured { .. } => tl("misurata"),
+    }
+}
+
+/// The planes of an annotation being made in the background.
+type AnnotationAnswer = std::sync::mpsc::Receiver<[(Arc<Vec<f32>>, u64); 4]>;
+
+/// Names and marks laid over the finished image: premultiplied red, green, blue and coverage
+/// planes for the working source they were made for.
+struct Annotation {
+    source_gen: u64,
+    /// What it was made from (names, options, image): to know when it is out of date.
+    key: u64,
+    planes: [(Arc<Vec<f32>>, u64); 4],
+}
+
+impl Document {
+    /// The names to lay over the image, if they were made for the image as it is now.
+    fn overlay(&self) -> Option<[(Arc<Vec<f32>>, u64); 4]> {
+        self.annotation.as_ref().filter(|a| a.source_gen == self.source_gen).map(|a| a.planes.clone())
     }
 }
 
@@ -167,6 +188,7 @@ struct RequestKey {
     pipeline: Pipeline,
     roi: Option<Roi>,
     luminance_gen: Option<u64>,
+    overlay_gen: Option<u64>,
     bxt: Option<PathBuf>,
     mask_overlay: Option<u64>,
     memory_saving: bool,
@@ -231,6 +253,8 @@ pub struct PlanetaryStudio {
     /// resolution map's colours span.
     smart_view: SmartView,
     smart_legend: Option<(f32, f32)>,
+    /// The learned sharpening under the three hypotheses on the seeing.
+    smart_compare: crate::smart_compare::SmartCompare,
     /// The equipment window (from the top bar).
     instrument_open: bool,
     /// A levels slider or curve point was being dragged in the last panel pass.
@@ -241,6 +265,8 @@ pub struct PlanetaryStudio {
     snapshot: Option<Snapshot>,
     /// "Identifica": names from the ephemerides over the image.
     identify: crate::identify_ui::IdentifyState,
+    /// The annotation being made in the background: (what from, image generation, answer).
+    annotating: Option<(u64, u64, AnnotationAnswer)>,
     /// The "Ingrandisci" tab's preview tiles.
     resize_preview: crate::resize_ui::ResizePreview,
     /// The last file exported, shown in the export tab.
@@ -275,6 +301,8 @@ impl PlanetaryStudio {
             })
             .unwrap_or_default();
         let prefs = cc.storage.and_then(|s| eframe::get_value::<Preferences>(s, STORAGE_PREFS)).unwrap_or_default().upgraded();
+        // Always start on the sharpening tab, whatever was open last time.
+        let prefs = Preferences { current_area: prefs_group::Group::Sharpness.name().to_string(), ..prefs };
         ps_core::i18n::set_lang(prefs.language);
         let pipeline = Pipeline::default();
         let (events_tx, events_rx) = channel();
@@ -304,6 +332,7 @@ impl PlanetaryStudio {
             show_ringing: false,
             smart_view: SmartView::None,
             smart_legend: None,
+            smart_compare: Default::default(),
             instrument_open: false,
             tone_dragging: false,
             show_clipping: false,
@@ -312,6 +341,7 @@ impl PlanetaryStudio {
             last_export: None,
             resize_preview: Default::default(),
             identify: Default::default(),
+            annotating: None,
             worker: Worker::new(cc.egui_ctx.clone()),
             last_request: None,
             last_output: None,
@@ -496,45 +526,92 @@ impl PlanetaryStudio {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             self.prefs.export_format = ext.to_ascii_lowercase();
         }
-        self.export_to(ctx, path, false);
+        self.export_to(ctx, path);
     }
 
-    /// Export next to the original under [`Self::export_stem`], never overwriting a file; with
-    /// `labelled`, the identified names are printed on the picture.
-    fn quick_export(&mut self, ctx: &egui::Context, labelled: bool) {
+    /// Export next to the original under [`Self::export_stem`], never overwriting a file.
+    fn quick_export(&mut self, ctx: &egui::Context) {
         let Some(doc) = &self.document else { return };
-        let (dir, mut stem) = (doc.path.parent().map(Path::to_path_buf).unwrap_or_default(), self.export_stem());
-        if labelled {
-            stem.push_str("_nomi");
-        }
+        let (dir, stem) = (doc.path.parent().map(Path::to_path_buf).unwrap_or_default(), self.export_stem());
         let ext = self.prefs.export_format.clone();
         let path = (1..)
             .map(|k| dir.join(if k == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{k}.{ext}") }))
             .find(|p| !p.exists())
             .expect("some name is free");
-        self.export_to(ctx, path, labelled);
+        self.export_to(ctx, path);
+    }
+
+    /// Keep the «Annotazione» layer in step with the Identifica tab: made when switched on,
+    /// remade (in the background) whenever the names, the options or the identification change,
+    /// dropped when switched off.
+    fn update_annotation(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &mut self.document else { return };
+        if !self.identify.annotate {
+            doc.annotation = None;
+            self.annotating = None;
+            return;
+        }
+        if let Some((key, source_gen, rx)) = &self.annotating
+            && let Ok(planes) = rx.try_recv()
+        {
+            doc.annotation = Some(Annotation { source_gen: *source_gen, key: *key, planes });
+            self.annotating = None;
+            ctx.request_repaint();
+        }
+        let doc = self.document.as_ref().expect("checked above");
+        let Some(plan) = self.identify.plan(&identify_input(doc), &self.prefs.identify) else { return };
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (format!("{plan:?}{:?}", self.prefs.identify), doc.source_gen).hash(&mut hasher);
+        let key = hasher.finish();
+        let current = doc.annotation.as_ref().is_some_and(|a| a.key == key && a.source_gen == doc.source_gen) || self.annotating.as_ref().is_some_and(|(k, g, _)| *k == key && *g == doc.source_gen);
+        if current {
+            return;
+        }
+        let (w, h, depth, source_gen) = (doc.source.width(), doc.source.height(), doc.source.source_bit_depth, doc.source_gen);
+        let opt = self.prefs.identify.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let flat = |v: f32| Image::new(w, h, vec![vec![v; w * h]; 3], depth);
+            // The same marks over black and over white give the colour (premultiplied) and the coverage.
+            let (on_black, on_white) = (crate::annotate::burn_in(&flat(0.0), &plan, &opt), crate::annotate::burn_in(&flat(1.0), &plan, &opt));
+            let mut coverage = vec![0.0f32; w * h];
+            for (i, a) in coverage.iter_mut().enumerate() {
+                let lost: f32 = (0..3).map(|c| on_white.channels()[c][i] - on_black.channels()[c][i]).sum::<f32>() / 3.0;
+                *a = (1.0 - lost).clamp(0.0, 1.0);
+            }
+            let plane = |v: Vec<f32>| (Arc::new(v), next_generation());
+            let [r, g, b] = [0, 1, 2].map(|c| plane(on_black.channels()[c].iter().zip(&coverage).map(|(p, a)| p.min(*a)).collect()));
+            tx.send([r, g, b, plane(coverage)]).ok();
+            ctx.request_repaint();
+        });
+        self.annotating = Some((key, source_gen, rx));
     }
 
     /// The enlargement export applies, if switched on.
+    /// The pipeline actually processed: modules not shown are off, and the things only the capture
+    /// knows are filled in (Jupiter's tilt towards us, from the time, for the photometric colour).
+    fn processed_pipeline(&self, doc: &Document) -> Pipeline {
+        let mut p = self.prefs.effective(&self.pipeline, doc.kind, doc.source.is_mono());
+        let when = self.identify.chosen_time().or(doc.capture.info.time);
+        p.photocolor.params.tilt = when.map_or(0.0, |t| ps_core::moons::jupiter_tilt(&t)) as f32;
+        p
+    }
+
     fn resize_params(&self) -> Option<ps_core::resample::ResizeParams> {
         let doc = self.document.as_ref()?;
         let sun = doc.capture.body == Some(ps_core::capture::Body::Sun);
         self.prefs.resize.params(doc.source.width(), doc.source.height(), doc.kind, sun)
     }
 
-    fn export_to(&mut self, ctx: &egui::Context, path: PathBuf, labelled: bool) {
+    fn export_to(&mut self, ctx: &egui::Context, path: PathBuf) {
         let resize = self.resize_params();
         let Some(doc) = &self.document else { return };
-        // The names from the identification on screen, printed after any enlargement.
-        let layer = if labelled { self.identify.plan(&identify_input(doc), &self.prefs.identify) } else { None };
-        if labelled && layer.is_none() {
-            self.status = tl("nessun nome da stampare: apri la scheda Identifica e controlla l'oggetto e la data").to_string();
-            return;
-        }
-        let label_options = self.prefs.identify.clone();
-        let pipeline = self.prefs.effective(&self.pipeline, doc.kind, doc.source.is_mono());
+        let overlay = doc.overlay();
+        let pipeline = self.processed_pipeline(doc);
         // Usually already rendered (in the foreground or in the background while on a ROI).
-        let ready = self.full_output.as_ref().filter(|o| o.source_gen == doc.source_gen && o.pipeline == pipeline).map(|o| Arc::clone(&o.image));
+        let ready = self.full_output.as_ref().filter(|o| o.source_gen == doc.source_gen && o.pipeline == pipeline && o.overlay_gen == overlay.as_ref().map(|p| p[3].1)).map(|o| Arc::clone(&o.image));
         let source = Arc::clone(&doc.source);
         let luminance = doc.luminance.as_ref().map(|l| l.cropped.clone());
         let bxt = self.prefs.bxt_executable();
@@ -546,16 +623,12 @@ impl PlanetaryStudio {
             let start = Instant::now();
             let image = ready.unwrap_or_else(|| {
                 let masks = ps_core::pipeline::masks_for(&pipeline, &source);
-                let aux = Aux { masks: &masks, luminance, bxt_executable: bxt.as_deref(), ..Default::default() };
+                let aux = Aux { masks: &masks, luminance, overlay, bxt_executable: bxt.as_deref(), ..Default::default() };
                 let out = Processor::default().run(source, next_generation(), &pipeline, &aux, &|| false, &|_, _| {});
                 out.expect("never cancelled").image
             });
             let image = match &resize {
                 Some(r) => Arc::new(ps_core::resample::resize(&image, r)),
-                None => image,
-            };
-            let image = match &layer {
-                Some(plan) => Arc::new(crate::annotate::burn_in(&image, plan, &label_options)),
                 None => image,
             };
             let event = match ps_io::save(&path, &image) {
@@ -666,14 +739,14 @@ impl PlanetaryStudio {
     fn instrument_menu(&mut self, ui: &mut egui::Ui) {
         let Some(doc) = &self.document else { return };
         let label = setup_label(&doc.setup);
-        let button = egui::Button::new((ICON_PHOTO_CAMERA.rich_text().color(ACCENT), RichText::new(label).color(TEXT))).corner_radius(egui::CornerRadius::same(7));
+        let button = egui::Button::new((ICON_PHOTO_CAMERA.rich_text().color(ACCENT), RichText::new(label).color(TEXT))).corner_radius(egui::CornerRadius::same(theme::radius::L));
         let mut picked = None;
         let mut details = false;
         let current = doc.setup.clone();
         let recent = self.prefs.recent_setups.clone();
         egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
             ui.set_min_width(240.0);
-            ui.label(RichText::new(tl("STRUMENTI RECENTI")).small().strong().color(TEXT_WEAK));
+            ui.label(caps(tl("STRUMENTI RECENTI")));
             if recent.is_empty() {
                 ui.label(RichText::new(tl("Nessuno: scegli telescopio e camera nei dettagli")).small().color(TEXT_WEAK));
             }
@@ -708,13 +781,11 @@ impl PlanetaryStudio {
         let mut open = true;
         let mut actions = Vec::new();
         if let Some(doc) = &mut self.document {
-            egui::Window::new(RichText::new(tl("Strumento")).strong())
+            crate::widgets::window(ctx, tl("Strumento"))
                 .open(&mut open)
                 .default_pos(egui::pos2(200.0, 56.0))
                 .default_width(440.0)
                 .default_height(640.0)
-                .resizable(true)
-                .collapsible(false)
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                         let view = InstrumentView { setup: &mut doc.setup, capture: &mut doc.capture, analysis: &doc.analysis, wavelet: &self.pipeline.wavelet.params };
@@ -790,11 +861,12 @@ impl PlanetaryStudio {
             Stage::Dering => p.dering.params = DeringParams { strokes: std::mem::take(&mut p.dering.params.strokes), ..start.dering.params },
             Stage::Tone => p.tone.params = start.tone.params,
             Stage::Curves => p.curves.params = start.curves.params,
+            Stage::PhotoColor => p.photocolor.params = start.photocolor.params,
             Stage::Color => p.color.params = start.color.params,
             Stage::Mineral => p.mineral.params = start.mineral.params,
             Stage::SunColor => p.suncolor.params = start.suncolor.params,
-            Stage::Rings | Stage::Moons => self.apply_auto_module(stage),
-            Stage::Layers => {}
+            // Masks, not cards: nothing to reset here.
+            Stage::Layers | Stage::Rings | Stage::Moons => {}
         }
     }
 
@@ -839,18 +911,15 @@ impl PlanetaryStudio {
                 curves.current.curve = vec![[0.0, 0.0], [0.25, 0.22], [0.75, 0.79], [1.0, 1.0]];
                 p.curves = Module::on(curves);
             }
+            // Jupiter's colours carried onto the Hubble map, in full.
+            Stage::PhotoColor => p.photocolor = Module::on(ps_core::photocolor::PhotoColorParams::default()),
             Stage::Mineral => p.mineral = Module::on(Default::default()),
             // The yellow the Sun is usually pictured in, at full strength.
             Stage::SunColor => p.suncolor = Module::on(ps_core::suncolor::SunColorParams::default()),
             // The automatic settings keep the area touched up by hand.
             Stage::Dering => p.dering = Module::on(DeringParams { strength: 1.0, strokes: p.dering.params.strokes.clone(), width: p.dering.params.width, ..auto.dering.params }),
-            Stage::Rings | Stage::Moons => {
-                // Start the dedicated layer over with its default settings.
-                let role = if stage == Stage::Rings { LayerRole::Rings } else { LayerRole::Moons };
-                p.layers.retain(|l| l.role != Some(role));
-                add_role_layer(p, role);
-            }
-            Stage::Layers => {}
+            // Masks, not cards: their recommended settings come back from the mask's editor.
+            Stage::Layers | Stage::Rings | Stage::Moons => {}
         }
     }
 
@@ -919,6 +988,8 @@ impl PlanetaryStudio {
 
     /// New orientation: the crop is reset (it referred to the old orientation).
     fn set_geometry(&mut self, ctx: &egui::Context, g: Geometry) {
+        // Orientation and the craters clicked on the image referred to the old one.
+        self.identify.orientation_reset();
         let Some(doc) = &mut self.document else { return };
         doc.geometry = g;
         doc.oriented = Arc::new(geometry::apply(&doc.original, &g));
@@ -947,6 +1018,7 @@ impl PlanetaryStudio {
         for layer in &mut self.pipeline.layers {
             layer.mask.translate(dx, dy);
         }
+        self.identify.image_shifted(dx, dy);
         self.last_output = None;
         self.full_output = None;
         self.mask_thumbs.clear();
@@ -1012,12 +1084,11 @@ impl PlanetaryStudio {
                         analysis: *analysis,
                         kind,
                         luminance: None,
+                        annotation: None,
                         mosaic: mosaic.map(|m| *m),
                         capture,
                         setup,
                     });
-                    self.cropping = false;
-                    self.layer_tool = LayerTool::None;
                     self.last_output = None;
                     self.full_output = None;
                     self.mask_thumbs.clear();
@@ -1095,7 +1166,8 @@ impl PlanetaryStudio {
         };
         let mask_overlay = self.selected_layer.filter(|_| self.show_mask);
         let luminance = doc.luminance.as_ref().map(|l| l.cropped.clone());
-        let pipeline = self.prefs.effective(&self.pipeline, doc.kind, doc.source.is_mono());
+        let overlay = doc.overlay();
+        let pipeline = self.processed_pipeline(doc);
         // Quick preview while a control in the panel is being dragged and the settings change.
         let dragging = self.prefs.fast_preview && roi.is_none() && !self.canvas_hovered && ctx.input(|i| i.pointer.any_down());
         let changing = self.last_request.as_ref().is_none_or(|k| k.proxy > 1 || k.pipeline != pipeline);
@@ -1105,6 +1177,7 @@ impl PlanetaryStudio {
             pipeline,
             roi,
             luminance_gen: luminance.as_ref().map(|l| l.1),
+            overlay_gen: overlay.as_ref().map(|o| o[3].1),
             bxt: self.prefs.bxt_executable(),
             mask_overlay,
             memory_saving: self.prefs.memory_saving,
@@ -1123,6 +1196,7 @@ impl PlanetaryStudio {
             roi,
             max_texture_side: ctx.input(|i| i.max_texture_side),
             luminance,
+            overlay,
             bxt_executable: key.bxt.clone(),
             mask_overlay,
             memory_saving: key.memory_saving,
@@ -1190,29 +1264,6 @@ impl PlanetaryStudio {
         if ctx.input_mut(|i| i.consume_shortcut(&SETTINGS)) {
             self.settings.open = !self.settings.open;
         }
-        if self.settings.open {
-            return;
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&OPEN)) {
-            self.open_dialog(ctx);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&QUICK_EXPORT)) {
-            self.quick_export(ctx, false);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&EXPORT)) {
-            self.export_dialog(ctx);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&ACTUAL_SIZE))
-            && let Some(doc) = &mut self.document
-        {
-            doc.viewer.set_zoom(1.0);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&REDO)) {
-            self.history.redo(&mut self.pipeline);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
-            self.history.undo(&mut self.pipeline);
-        }
         // Several images dropped together: a mosaic of them.
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         // A capture log dropped on an open image is read for it.
@@ -1226,8 +1277,32 @@ impl PlanetaryStudio {
             1 => self.load(ctx, dropped.into_iter().next().expect("one")),
             _ => self.mosaic_editor.start(ctx, dropped),
         }
+        if self.settings.open {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&OPEN)) {
+            self.open_dialog(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&QUICK_EXPORT)) {
+            self.quick_export(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&EXPORT)) {
+            self.export_dialog(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&ACTUAL_SIZE))
+            && let Some(doc) = &mut self.document
+        {
+            doc.viewer.set_zoom(1.0);
+        }
+        // A focused text field undoes its own typing: leave ⌘Z / ⇧⌘Z to it.
         if ctx.egui_wants_keyboard_input() {
             return;
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&REDO)) {
+            self.history.redo(&mut self.pipeline);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
+            self.history.undo(&mut self.pipeline);
         }
         if self.cropping {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
@@ -1306,11 +1381,13 @@ impl PlanetaryStudio {
                     self.clear_auto();
                     self.prefs.auto_structure = false;
                 }
-                PanelAction::Export => self.quick_export(ctx, false),
-                PanelAction::ExportLabelled => self.quick_export(ctx, true),
+                PanelAction::Export => self.quick_export(ctx),
+                PanelAction::OpenAnnotation => {
+                    self.prefs.current_area = prefs_group::Group::Identify.name().to_string();
+                    self.identify.sub = crate::identify_ui::Sub::Annotate;
+                }
                 PanelAction::NorthUp { mirror, degrees } => {
                     self.rotate(ctx, |g| *g = g.then(mirror, degrees));
-                    self.identify.orientation_reset();
                 }
                 PanelAction::ExportAs => self.export_dialog(ctx),
                 PanelAction::SavePreset => self.save_preset(),
@@ -1463,7 +1540,6 @@ impl PlanetaryStudio {
         }
     }
 
-    /// The star or small moon near (`x`, `y`) becomes the deconvolution's PSF.
     /// The PSF from the star or moon inside `area` (image pixels of the oriented, cropped
     /// source), and a note saying what was found.
     fn measure_psf(&mut self, area: Rect) {
@@ -1522,7 +1598,7 @@ impl PlanetaryStudio {
                     Some(params) => {
                         let mut p = Pipeline::default();
                         (p.align.enabled, p.bxt.enabled, p.denoise.enabled, p.wavelet.enabled, p.contrast.enabled) = (false, false, false, false, false);
-                        (p.dering.enabled, p.tone.enabled, p.curves.enabled, p.color.enabled, p.mineral.enabled, p.suncolor.enabled) = (false, false, false, false, false, false);
+                        (p.dering.enabled, p.tone.enabled, p.curves.enabled, p.color.enabled, p.mineral.enabled, p.suncolor.enabled, p.photocolor.enabled) = (false, false, false, false, false, false, false);
                         p.deconv = Module::on(params);
                         match Processor::default().run(Arc::clone(&crop), next_generation(), &p, &Aux::default(), &|| false, &|_, _| {}) {
                             Some(out) => out.image,
@@ -1551,7 +1627,7 @@ impl PlanetaryStudio {
         let current = &self.pipeline.deconv.params;
         let mut open = true;
         let mut chosen = None;
-        egui::Window::new(tl("Confronto deconvoluzione")).collapsible(false).resizable(true).default_size([960.0, 700.0]).open(&mut open).show(ctx, |ui| {
+        crate::widgets::window(ctx, tl("Confronto deconvoluzione")).default_size([960.0, 700.0]).open(&mut open).show(ctx, |ui| {
             panels::hint(ui, &tr!("Zona visibile dell'immagine, sfocatura {:.1} px. Sopra: le tre forme di PSF con Richardson–Lucy. Sotto: l'originale e i due algoritmi con la forma attuale.", "Visible area of the image, blur {:.1} px. Top: the three PSF shapes with Richardson–Lucy. Bottom: the original and the two algorithms with the current shape.", compare.fwhm));
             let avail = ui.available_size();
             let side = ((avail.x - 24.0) / 3.0).min((avail.y - 90.0) / 2.0).max(120.0);
@@ -1576,7 +1652,7 @@ impl PlanetaryStudio {
                                 }
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(&tile.label).strong());
-                                    if tile.params.is_some() && ui.small_button(tl("Usa questa")).clicked() {
+                                    if tile.params.is_some() && ui.button((ICON_CHECK.rich_text(), tl("Usa questa"))).clicked() {
                                         chosen = Some(k);
                                     }
                                 });
@@ -1642,7 +1718,7 @@ impl PlanetaryStudio {
     /// One bar: application menus on the left, view controls (found in no menu) on the right.
     fn top_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.label(ICON_PLANET.rich_text().size(20.0).color(ACCENT));
+            ui.label(ICON_PLANET.rich_text().size(theme::size::ICON).color(ACCENT));
             ui.add_space(4.0);
             ui.menu_button("File", |ui| {
                 if ui.add(egui::Button::new((ICON_FOLDER_OPEN.rich_text(), tl("Apri…"))).shortcut_text(ctx.format_shortcut(&OPEN))).clicked() {
@@ -1650,7 +1726,7 @@ impl PlanetaryStudio {
                 }
                 let quick = egui::Button::new((ICON_IOS_SHARE.rich_text(), tl("Esporta"))).shortcut_text(ctx.format_shortcut(&QUICK_EXPORT));
                 if ui.add_enabled(self.document.is_some(), quick).on_hover_text(tl("Accanto all'originale, nel formato dell'ultima volta")).clicked() {
-                    self.quick_export(ctx, false);
+                    self.quick_export(ctx);
                 }
                 let export = egui::Button::new((ICON_SAVE_AS.rich_text(), tl("Esporta come…"))).shortcut_text(ctx.format_shortcut(&EXPORT));
                 if ui.add_enabled(self.document.is_some(), export).clicked() {
@@ -1670,7 +1746,7 @@ impl PlanetaryStudio {
                 if ui.button((ICON_UPLOAD_FILE.rich_text(), tl("Carica impostazioni…"))).clicked() {
                     self.load_preset();
                 }
-                if ui.button((ICON_SAVE_AS.rich_text(), tl("Salva impostazioni…"))).clicked() {
+                if ui.button((ICON_SAVE.rich_text(), tl("Salva impostazioni…"))).clicked() {
                     self.save_preset();
                 }
             });
@@ -1782,11 +1858,22 @@ impl PlanetaryStudio {
                     if tool_button(ui, ICON_CROP, tl("Ritaglia"), self.cropping).on_hover_text(tl("Ritaglia e ruota (C)")).clicked() && !self.cropping {
                         self.start_crop();
                     }
-                    if tool_button(ui, ICON_TRAVEL_EXPLORE, tl("Identifica"), self.identify.active)
+                    // On by itself, or while its tab is the one showing (like the burnt pixels while a curve is dragged).
+                    let in_tab = self.prefs.current_area == prefs_group::Group::Identify.name();
+                    if tool_button(ui, ICON_TRAVEL_EXPLORE, tl("Identifica"), self.identify.active || in_tab)
                         .on_hover_text(tl("Riconosce l'oggetto e scrive i nomi sull'immagine: lune di Giove e Saturno, crateri e mari della Luna. Usa data e informazioni della ripresa. Le impostazioni sono nella scheda «Identifica e annota»"))
                         .clicked()
                     {
-                        self.identify.active = !self.identify.active;
+                        if in_tab {
+                            // Off: the tab closes with it.
+                            self.identify.active = false;
+                            self.prefs.current_area = prefs_group::Group::Sharpness.name().to_string();
+                        } else if self.identify.active {
+                            self.identify.active = false;
+                        } else {
+                            self.identify.switch_on();
+                            self.prefs.current_area = prefs_group::Group::Identify.name().to_string();
+                        }
                     }
                 }
             });
@@ -1799,7 +1886,7 @@ impl PlanetaryStudio {
         self.show_clipping || self.tone_dragging
     }
 
-        fn status_bar(&mut self, ui: &mut egui::Ui) {
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if let Some(busy) = &self.io_busy {
                 ui.add(egui::Spinner::new().size(12.0).color(ACCENT));
@@ -1880,6 +1967,7 @@ impl PlanetaryStudio {
             Stage::Dering => p.dering.enabled && !p.dering.params.is_neutral(),
             Stage::Tone => p.tone.enabled && !p.tone.params.is_neutral(),
             Stage::Curves => p.curves.enabled && !p.curves.params.is_neutral(),
+            Stage::PhotoColor => p.photocolor.enabled && !p.photocolor.params.is_neutral(),
             Stage::Color => p.color.enabled && !p.color.params.is_neutral(),
             Stage::Mineral => p.mineral.enabled && (!p.mineral.params.is_neutral() || self.document.as_ref().is_some_and(|d| d.luminance.is_some())),
             Stage::SunColor => p.suncolor.enabled && !p.suncolor.params.is_neutral(),
@@ -1891,9 +1979,12 @@ impl PlanetaryStudio {
 
     fn side_panel(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::Panel::bottom("histogram").frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 10))).show(ui, |ui| {
-            ui.label(RichText::new(tl("ISTOGRAMMA")).small().strong().color(TEXT_WEAK));
+            ui.label(caps(tl("ISTOGRAMMA")));
             ui.add_space(4.0);
-            self.histogram.clone().unwrap_or_default().show(ui);
+            match &self.histogram {
+                Some(h) => h.show(ui),
+                None => Histogram::default().show(ui),
+            }
         });
 
         let mut actions = Vec::new();
@@ -1907,16 +1998,18 @@ impl PlanetaryStudio {
         let adapt = self.prefs.adapt_to_image;
         let one_open = self.prefs.one_group_open;
         let bxt_configured = self.prefs.bxt_executable().is_some();
-        let tone_histogram = self.last_output.as_ref().map(|o| o.tone_histogram.clone());
-        let curves_histogram = self.last_output.as_ref().map(|o| o.curves_histogram.clone());
         let deconv_report = self.last_output.as_ref().and_then(|o| o.deconv);
         let active_stages: std::collections::HashSet<Stage> = layout.iter().flat_map(|(_, s)| s.iter().copied()).filter(|s| self.stage_active(*s)).collect();
         let gpu = self.prefs.use_gpu && matches!(ps_core::gpu::status(), Some(Some(_)));
         let last_export = self.last_export.clone();
-        let export_stem = self.export_stem();
+        // Only the export tab shows the name (building it may read the file's date).
+        let export_stem = if self.prefs.current_area == prefs_group::Group::Export.name() { self.export_stem() } else { String::new() };
         let resize_image = self.document.as_ref().map(|d| self.full_output.as_ref().filter(|o| o.source_gen == d.source_gen && o.image.width() == d.source.width()).map_or_else(|| Arc::clone(&d.source), |o| Arc::clone(&o.image)));
-        let Self { document, pipeline, prefs, psf_preview, psf_note, timings, warnings, selected_layer, show_mask, layer_tool, brush, mask_thumbs, side_width, show_ringing, smart_view, smart_legend, resize_preview, identify, .. } = self;
+        let Self { document, pipeline, prefs, psf_preview, psf_note, timings, warnings, selected_layer, show_mask, layer_tool, brush, mask_thumbs, side_width, show_ringing, smart_view, smart_legend, smart_compare, resize_preview, identify, last_output, .. } = self;
+        let tone_histogram = last_output.as_ref().map(|o| &o.tone_histogram);
+        let curves_histogram = last_output.as_ref().map(|o| &o.curves_histogram);
         let Some(doc) = document else { return };
+        smart_compare.update(ui.ctx(), &doc.source, doc.source_gen, &pipeline.smart.params, &doc.analysis);
         let why = explain(doc.kind, &doc.analysis, pipeline.wavelet.params.scale_mode);
         let auto_deconv = ps_core::preset::auto_deconv(doc.kind, &doc.analysis, prefs.auto_strength);
         let auto_smart = ps_core::preset::smart_structure(doc.kind, &doc.analysis);
@@ -1990,7 +2083,7 @@ impl PlanetaryStudio {
                         let bxt_running = status.running;
                         let mut collapsed = !prefs.expanded.contains(&stage);
                         let is_active = active_stages.contains(&stage);
-                        let layer_ui = |selected, show_mask, tool, brush, folded| LayerUi { selected, show_mask, tool, brush, collapsed: folded, kind: doc.kind, adapt, mono, wavelet_start: &wavelet_start, smart_start: &auto_smart, thumbs: &*mask_thumbs };
+                        let layer_ui = |selected, show_mask, tool, brush, folded| LayerUi { selected, show_mask, tool, brush, collapsed: folded, kind: doc.kind, adapt, mono, wavelet_start: &wavelet_start, smart_start: &auto_smart, thumbs: &*mask_thumbs, annotation: None };
                         let buttons = match stage {
                             Stage::Align => panels::module_card(ui, stage, Some(&mut pipeline.align.enabled), is_active, &mut collapsed, status, |ui| {
                                 panels::align_body(ui, &mut pipeline.align.params, mono)
@@ -2011,7 +2104,7 @@ impl PlanetaryStudio {
                                 panels::wavelet_body(ui, &mut pipeline.wavelet.params, view)
                             }),
                             Stage::Smart => panels::module_card(ui, stage, Some(&mut pipeline.smart.enabled), is_active, &mut collapsed, status, |ui| {
-                                panels::smart_body(ui, &mut pipeline.smart.params, &auto_smart, &mut *smart_view, *smart_legend, &upstream)
+                                panels::smart_body(ui, &mut pipeline.smart.params, &auto_smart, &mut *smart_view, *smart_legend, &upstream, panels::LearnedView { analysis: &doc.analysis, thumbs: smart_compare.thumbs(), busy: smart_compare.busy() })
                             }),
                             Stage::Contrast => panels::module_card(ui, stage, Some(&mut pipeline.contrast.enabled), is_active, &mut collapsed, status, |ui| {
                                 panels::contrast_body(ui, &mut pipeline.contrast.params)
@@ -2021,10 +2114,13 @@ impl PlanetaryStudio {
                                 panels::dering_body(ui, &mut pipeline.dering.params, &why.dering, &mut *show_ringing, state)
                             }),
                             Stage::Tone => panels::module_card(ui, stage, Some(&mut pipeline.tone.enabled), is_active, &mut collapsed, status, |ui| {
-                                panels::tone_body(ui, &mut pipeline.tone.params, ToneParts::Levels, None, tone_histogram.as_ref(), &mut prefs.histogram_mode, mono, &mut actions)
+                                panels::tone_body(ui, &mut pipeline.tone.params, ToneParts::Levels, None, tone_histogram, &mut prefs.histogram_mode, mono, &mut actions)
                             }),
                             Stage::Curves => panels::module_card(ui, stage, Some(&mut pipeline.curves.enabled), is_active, &mut collapsed, status, |ui| {
-                                panels::tone_body(ui, &mut pipeline.curves.params, ToneParts::Curve, None, curves_histogram.as_ref(), &mut prefs.histogram_mode, mono, &mut actions)
+                                panels::tone_body(ui, &mut pipeline.curves.params, ToneParts::Curve, None, curves_histogram, &mut prefs.histogram_mode, mono, &mut actions)
+                            }),
+                            Stage::PhotoColor => panels::module_card(ui, stage, Some(&mut pipeline.photocolor.enabled), is_active, &mut collapsed, status, |ui| {
+                                panels::photocolor_body(ui, &mut pipeline.photocolor.params)
                             }),
                             Stage::Color => panels::module_card(ui, stage, Some(&mut pipeline.color.enabled), is_active, &mut collapsed, status, |ui| {
                                 panels::color_body(ui, &mut pipeline.color.params, mono)
@@ -2033,7 +2129,8 @@ impl PlanetaryStudio {
                             Stage::Rings | Stage::Moons => panels::CardButtons::default(),
                             // The list of masks, then the selected one's editor: no card to fold.
                             Stage::Layers => {
-                                let state = layer_ui(&mut *selected_layer, &mut *show_mask, &mut *layer_tool, &mut *brush, &mut prefs.collapsed_sections);
+                                let mut state = layer_ui(&mut *selected_layer, &mut *show_mask, &mut *layer_tool, &mut *brush, &mut prefs.collapsed_sections);
+                                state.annotation = Some(&mut identify.annotate);
                                 panels::masks_area(ui, &mut pipeline.layers, state, &mut actions);
                                 panels::CardButtons::default()
                             }
@@ -2076,11 +2173,7 @@ impl PlanetaryStudio {
             ui.add_space(2.0);
             ui.label(RichText::new(tl("Il tipo viene riconosciuto e le impostazioni scelte automaticamente")).color(TEXT_WEAK));
             ui.add_space(16.0);
-            let black = egui::Color32::BLACK;
-            let open = egui::Button::new((ICON_FOLDER_OPEN.rich_text().color(black), RichText::new(tl("Apri immagine…")).color(black).strong()))
-                .fill(ACCENT)
-                .min_size(egui::vec2(180.0, 36.0))
-                .corner_radius(egui::CornerRadius::same(8));
+            let open = primary_button(Some(ICON_FOLDER_OPEN), tl("Apri immagine…")).min_size(egui::vec2(180.0, 36.0));
             if ui.add(open).clicked() {
                 self.open_dialog(ctx);
             }
@@ -2103,6 +2196,9 @@ impl eframe::App for PlanetaryStudio {
         let ctx = &ui.ctx().clone();
         self.handle_events(ctx);
         self.handle_shortcuts(ctx);
+        // The subject (the Identifica tab's choice over the file name, log or pixels) decides which
+        // subject-specific cards exist.
+        self.prefs.subject = self.document.as_ref().and_then(|d| self.identify.chosen_body().or(identify_input(d).body));
         self.drop_stale_selection();
         self.drop_stale_snapshot(ctx);
         let tool_before = (self.layer_tool, self.selected_layer);
@@ -2112,7 +2208,12 @@ impl eframe::App for PlanetaryStudio {
             d.insert_temp(egui::Id::unique(panels::SMART_ZONES_SWITCH_SHOWN), false);
             d.insert_temp(egui::Id::unique(panels::TONE_DRAGGING), false);
         });
+        let auto_structure = self.prefs.auto_structure;
         self.settings.show(ctx, &mut self.prefs);
+        if self.prefs.auto_structure != auto_structure {
+            // Switched in Settings: adapt the open image too, as the panel's switch does.
+            self.apply_actions(ctx, vec![PanelAction::SetAutoStructure(self.prefs.auto_structure)]);
+        }
         ps_core::gpu::set_enabled(self.prefs.use_gpu);
         if let Some(MosaicOutcome::Create { mosaic, images, keep_settings }) = self.mosaic_editor.show(ctx) {
             self.create_mosaic(ctx, mosaic, images, keep_settings);
@@ -2174,7 +2275,10 @@ impl eframe::App for PlanetaryStudio {
                 {
                     let viewer = &doc.viewer;
                     let painter = ui.painter_at(viewer.canvas());
-                    self.identify.paint(&painter, |p| viewer.image_to_screen(p), viewer.zoom(), &self.prefs.identify);
+                    // Once the names are part of the image they are no longer drawn on top.
+                    if doc.overlay().is_none() {
+                        self.identify.paint(&painter, |p| viewer.image_to_screen(p), viewer.zoom(), &self.prefs.identify);
+                    }
                 }
                 // Floating over the image: how it is shown (top) and the zoom (bottom right).
                 let canvas = ui.max_rect();
@@ -2186,7 +2290,7 @@ impl eframe::App for PlanetaryStudio {
                         return;
                     }
                     egui::Area::new(egui::Id::unique(id)).order(egui::Order::Foreground).fixed_pos(at).pivot(pivot).show(ui.ctx(), |ui| {
-                        egui::Frame::new().fill(egui::Color32::from_black_alpha(190)).corner_radius(10).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
+                        egui::Frame::new().fill(egui::Color32::from_black_alpha(190)).corner_radius(theme::radius::WINDOW).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
                             ui.horizontal(|ui| add(ui));
                         });
                     });
@@ -2282,11 +2386,13 @@ impl eframe::App for PlanetaryStudio {
         self.instrument_window(ctx);
         // The search runs and the names show while the button is on or its tab is the one showing.
         self.identify.open = self.document.is_some() && (self.identify.active || self.prefs.current_area == prefs_group::Group::Identify.name());
+        self.update_annotation(ctx);
+        if let Some((mirror, degrees)) = self.identify.take_upright() {
+            self.rotate(ctx, |g| *g = g.then(mirror, degrees));
+        }
         if let Some(doc) = &self.document {
             let input = identify_input(doc);
             self.identify.update(ctx, &input);
-            let shown = self.full_output.as_ref().filter(|o| o.source_gen == doc.source_gen && o.image.width() == doc.source.width()).map_or_else(|| Arc::clone(&doc.source), |o| Arc::clone(&o.image));
-            self.identify.preview_window(ctx, &input, &self.prefs.identify, &shown);
             if self.identify.busy() {
                 ctx.request_repaint_after(Duration::from_millis(50));
             }
@@ -2684,7 +2790,7 @@ mod tests {
         harness.state_mut().prefs.export_format = "png".into();
         let ctx = harness.ctx.clone();
         for _ in 0..2 {
-            harness.state_mut().quick_export(&ctx, false);
+            harness.state_mut().quick_export(&ctx);
             for _ in 0..200 {
                 harness.step();
                 if harness.state().io_busy.is_none() {
@@ -2805,6 +2911,170 @@ mod tests {
         harness.render().unwrap().save(out_dir.join("ui_suncolor.png")).unwrap();
     }
 
+    /// The Colore tab with Jupiter's photometric colour card open and switched on, before and after:
+    /// `PS_SNAPSHOT_IMAGE=<absolute path of a colour Jupiter> PS_SNAPSHOT_OUT=dir cargo test -p ps-app -- --ignored snapshot_photocolor`
+    #[test]
+    #[ignore]
+    fn snapshot_photocolor() {
+        let input = PathBuf::from(std::env::var("PS_SNAPSHOT_IMAGE").expect("PS_SNAPSHOT_IMAGE"));
+        let out_dir = PathBuf::from(std::env::var("PS_SNAPSHOT_OUT").expect("PS_SNAPSHOT_OUT"));
+        let mut harness = egui_kittest::Harness::builder().with_size([1500.0, 940.0]).wgpu().build_eframe(|cc| PlanetaryStudio::new(cc, None));
+        harness.run_steps(3);
+        let ctx = harness.ctx.clone();
+        harness.state_mut().load(&ctx, input);
+        let settle = |harness: &mut egui_kittest::Harness<PlanetaryStudio>| {
+            for _ in 0..900 {
+                harness.step();
+                let app = harness.state();
+                let idle = app.io_busy.is_none() && !app.worker.is_busy() && !app.worker.is_background_busy() && !app.identify.busy();
+                if app.document.is_some() && app.last_output.is_some() && idle {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            harness.run_steps(4);
+        };
+        settle(&mut harness);
+        {
+            let app = harness.state_mut();
+            app.prefs.current_area = "Colore".into();
+            app.prefs.expanded = [Stage::PhotoColor].into();
+            // The subject is forced here: a file name with no planet in it wouldn't say Jupiter.
+            app.identify.set_body_for_test(ps_core::capture::Body::Jupiter);
+        }
+        settle(&mut harness);
+        harness.render().unwrap().save(out_dir.join("ui_photocolor_off.png")).unwrap();
+        harness.state_mut().pipeline.photocolor = Module::on(ps_core::photocolor::PhotoColorParams::default());
+        settle(&mut harness);
+        harness.render().unwrap().save(out_dir.join("ui_photocolor_on.png")).unwrap();
+    }
+
+    /// The final sharpening card with the learned curve: the three hypotheses on the seeing and
+    /// why the curve is shaped so (`PS_SNAPSHOT_IMAGE`, `PS_SNAPSHOT_OUT` as for [`snapshot`]).
+    #[test]
+    #[ignore]
+    fn snapshot_smart_learned() {
+        let input = PathBuf::from(std::env::var("PS_SNAPSHOT_IMAGE").expect("PS_SNAPSHOT_IMAGE"));
+        let out_dir = PathBuf::from(std::env::var("PS_SNAPSHOT_OUT").expect("PS_SNAPSHOT_OUT"));
+        if std::env::var("PS_SNAPSHOT_EN").is_ok() {
+            ps_core::i18n::set_lang(ps_core::i18n::Lang::En);
+        }
+        let img = std::sync::Arc::new(ps_io::load(&input).unwrap());
+        let analysis = ps_core::analysis::analyze(&img);
+        let mut params = ps_core::preset::auto_smart(analysis.kind, &analysis, ps_core::preset::AutoStrength::Normal);
+        let auto = params.clone();
+        let made = crate::smart_compare::make(&img, &params, crate::smart_compare::centre(&img, &analysis));
+        let mut thumbs = Vec::new();
+        let mut tab = egui_kittest::Harness::builder().with_size([420.0, 1500.0]).with_accessibility_check(false).build_ui(move |ui| {
+            crate::theme::apply(ui.ctx());
+            if thumbs.is_empty() {
+                thumbs = made.iter().map(|(n, c)| (*n, ui.ctx().load_texture(format!("{n:?}"), c.clone(), egui::TextureOptions::LINEAR))).collect();
+            }
+            egui::CentralPanel::default().show(ui, |ui| {
+                let view = panels::LearnedView { analysis: &analysis, thumbs: &thumbs, busy: false };
+                panels::smart_body(ui, &mut params, &auto, &mut SmartView::None, None, &[], view);
+            });
+        });
+        tab.run();
+        tab.render().unwrap().save(out_dir.join("ui_smart_learned.png")).unwrap();
+    }
+
+    /// The pictures of the GitHub page, from the user's own images: Saturn processed, Jupiter
+    /// and the Moon before/after, Saturn's rings mask, a lunar mosaic. `PS_SHOW_OUT` (dir),
+    /// `PS_SHOW_JUPITER`, `PS_SHOW_SATURN`, `PS_SHOW_MOON` (absolute paths), `PS_SHOW_MOSAIC`
+    /// (frames separated by '|'); `PS_SNAPSHOT_EN` for the English interface.
+    #[test]
+    #[ignore]
+    fn snapshot_showcase() {
+        let out_dir = PathBuf::from(std::env::var("PS_SHOW_OUT").expect("PS_SHOW_OUT"));
+        let mut harness = egui_kittest::Harness::builder().with_size([1500.0, 940.0]).wgpu().build_eframe(|cc| PlanetaryStudio::new(cc, None));
+        if std::env::var("PS_SNAPSHOT_EN").is_ok() {
+            harness.state_mut().prefs.language = ps_core::i18n::Lang::En;
+            ps_core::i18n::set_lang(ps_core::i18n::Lang::En);
+        }
+        harness.run_steps(3);
+        let ctx = harness.ctx.clone();
+        let settle = |harness: &mut egui_kittest::Harness<PlanetaryStudio>| {
+            for _ in 0..900 {
+                harness.step();
+                let app = harness.state();
+                let idle = app.io_busy.is_none() && !app.worker.is_busy() && !app.worker.is_background_busy() && !app.smart_compare.busy();
+                if app.document.is_some() && app.last_output.is_some() && idle {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            harness.run_steps(6);
+        };
+        // Opens an image, processed automatically, on the sharpening tab with the final
+        // sharpening open.
+        let open = |harness: &mut egui_kittest::Harness<PlanetaryStudio>, path: &str| {
+            harness.state_mut().load(&ctx, PathBuf::from(path));
+            for _ in 0..300 {
+                harness.step();
+                if harness.state().document.as_ref().is_some_and(|d| d.path == Path::new(path)) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            settle(harness);
+            harness.state_mut().apply_auto_all();
+            // And the final sharpening's own automatic: the learned curve.
+            harness.state_mut().apply_auto_module(Stage::Smart);
+            let app = harness.state_mut();
+            app.prefs.current_area = "Nitidezza".into();
+            app.prefs.expanded = [Stage::Smart].into();
+            settle(harness);
+        };
+        let save = |harness: &mut egui_kittest::Harness<PlanetaryStudio>, name: &str| harness.render().unwrap().save(out_dir.join(name)).unwrap();
+
+        if let Ok(saturn) = std::env::var("PS_SHOW_SATURN") {
+            open(&mut harness, &saturn);
+            {
+                let app = harness.state_mut();
+                app.compare = Compare::After;
+                app.document.as_mut().unwrap().viewer.set_zoom(2.0);
+            }
+            settle(&mut harness);
+            save(&mut harness, "main.png");
+            // The rings with their own mask.
+            {
+                let app = harness.state_mut();
+                app.prefs.current_area = "Maschere".into();
+                app.apply_actions(&ctx, vec![PanelAction::CreateRole(LayerRole::Rings)]);
+                app.selected_layer = app.pipeline.layers.iter().find(|l| l.role == Some(LayerRole::Rings)).map(|l| l.id);
+                app.show_mask = true;
+            }
+            settle(&mut harness);
+            save(&mut harness, "saturn-masks.png");
+        }
+        for (var, name, zoom) in [("PS_SHOW_JUPITER", "jupiter-before-after.png", 2.5), ("PS_SHOW_MOON", "moon-detail.png", 2.0)] {
+            if let Ok(path) = std::env::var(var) {
+                open(&mut harness, &path);
+                {
+                    let app = harness.state_mut();
+                    app.compare = Compare::Split;
+                    app.document.as_mut().unwrap().viewer.set_zoom(zoom);
+                }
+                settle(&mut harness);
+                save(&mut harness, name);
+            }
+        }
+        if let Ok(frames) = std::env::var("PS_SHOW_MOSAIC") {
+            harness.state_mut().compare = Compare::After;
+            harness.state_mut().mosaic_editor.start(&ctx, frames.split('|').map(PathBuf::from).collect());
+            for _ in 0..1500 {
+                harness.step();
+                if !harness.state().mosaic_editor.is_busy() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            harness.run_steps(6);
+            save(&mut harness, "lunar-mosaic.png");
+        }
+    }
+
     #[test]
     #[ignore]
     fn snapshot() {
@@ -2913,7 +3183,7 @@ mod tests {
             (app.pipeline.smart.enabled, app.pipeline.smart.params.strength) = (true, 0.6);
         }
         settle(&mut harness);
-        if let Some(node) = egui_kittest::kittest::Queryable::query_by_label(&harness, "AVANZATE") {
+        if let Some(node) = egui_kittest::kittest::Queryable::query_by_label(&harness, &tl("AVANZATE").to_uppercase()) {
             node.click();
         }
         harness.run_steps(2);
@@ -2953,13 +3223,13 @@ mod tests {
         harness.render().unwrap().save(out_dir.join("ui_wavelet_sticky.png")).unwrap();
         harness.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, 2000.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel });
         harness.run_steps(2);
-        egui_kittest::kittest::Queryable::get_by_label(&harness, "Classiche 1·2·4·8").click();
+        egui_kittest::kittest::Queryable::get_by_label(&harness, tl("Classiche 1·2·4·8")).click();
         settle(&mut harness);
         assert_eq!(harness.state().pipeline.wavelet.params.scale_mode, ScaleMode::Dyadic);
         assert_eq!(harness.state().prefs.wavelet_scales, ScaleMode::Dyadic);
         harness.render().unwrap().save(out_dir.join("ui_wavelet_classic.png")).unwrap();
 
-        egui_kittest::kittest::Queryable::get_by_label(&harness, "Libere").click();
+        egui_kittest::kittest::Queryable::get_by_label(&harness, tl("Libere")).click();
         settle(&mut harness);
 
         // The moons' layer: what it selects on top and on the image, then one adjustment.
@@ -3033,7 +3303,7 @@ mod tests {
             }
             harness.run_steps(4);
             harness.render().unwrap().save(out_dir.join("ui_mosaic.png")).unwrap();
-            egui_kittest::kittest::Queryable::get_by_label_contains(&harness, "Crea il mosaico").click();
+            egui_kittest::kittest::Queryable::get_by_label_contains(&harness, tl("Crea il mosaico")).click();
             for _ in 0..1500 {
                 harness.step();
                 if harness.state().document.as_ref().is_some_and(|d| d.mosaic.is_some()) && harness.state().last_output.is_some() {

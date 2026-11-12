@@ -401,3 +401,12 @@ Planetary Studio is built on these open-source Rust crates. Each one keeps its o
 | Source | Used for | License |
 |---|---|---|
 | Sonia Keys, [meeus](https://github.com/soniakeys/meeus) (`saturnmoons`, `jupitermoons`), after J. Meeus, *Astronomical Algorithms* ch. 44 and 46 | Positions of the moons of Jupiter and Saturn (`ps-core/src/moons.rs`) | MIT |
+
+## Data derived from public images and maps
+
+| Source | Used for | Terms |
+|---|---|---|
+| NASA, ESA, A. Simon (Goddard Space Flight Center), M.H. Wong (UC Berkeley), Hubble OPAL Jupiter global maps, 2019 rotation A (filters F631N, F547M, F467M) and 2021 rotation A (F631N, F502N, F467M), calibrated to I/F | Tables of 48 median colours by latitude band and a Red Spot colour, the Hubble references of the photometric colour (`ps-core/src/photocolor_data.rs`); the maps themselves are not included | NASA/ESA/STScI, credit required |
+| NASA/JPL/Space Science Institute, Cassini Jupiter cylindrical map PIA07782 (December 2000) | The same table for the Cassini reference | NASA/JPL, credit required |
+| NASA/GSFC/Arizona State University, LRO LOLA global DEM `ldem_16` (PDS) | Used only in a prototype (`ps-core/src/lunarmap.rs`, not wired into the app); the data is not included | NASA PDS, public domain |
+

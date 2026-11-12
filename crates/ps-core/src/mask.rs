@@ -125,12 +125,6 @@ pub struct Ellipse {
 }
 
 impl Ellipse {
-    /// The same ellipse in a region whose top-left corner is at (`x`, `y`), shrunk `factor`
-    /// times (a ROI, a reduced preview).
-    pub fn in_region(&self, x: f32, y: f32, factor: f32) -> Ellipse {
-        Ellipse { cx: (self.cx - x) / factor, cy: (self.cy - y) / factor, rx: self.rx / factor, ry: self.ry / factor, angle: self.angle }
-    }
-
     /// Normalised radius: < 1 inside.
     pub fn radius(&self, x: f32, y: f32) -> f32 {
         let (s, c) = self.angle.sin_cos();

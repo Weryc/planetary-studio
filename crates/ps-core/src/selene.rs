@@ -136,12 +136,6 @@ impl MoonView {
         c.clamp(-1.0, 1.0).asin() / RAD
     }
 
-    /// Direction of the bright limb in the Moon's frame (radians from +x towards +y).
-    pub fn bright_limb_angle(&self) -> f64 {
-        let (x, y, _) = self.project(self.sun_lon / RAD, self.sun_lat / RAD);
-        y.atan2(x)
-    }
-
     /// Phase name, in the interface language.
     pub fn phase_name(&self, waxing: bool) -> &'static str {
         let k = self.illuminated;

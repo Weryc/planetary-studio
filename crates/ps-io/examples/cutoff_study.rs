@@ -203,7 +203,7 @@ fn limb_mtf(plane: &[f32], w: usize, h: usize, e: Ellipse, saturn: bool) -> Opti
         }
         used += 1;
     }
-    if used < 20 || cnt.iter().any(|&c| c == 0) {
+    if used < 20 || cnt.contains(&0) {
         return None;
     }
     let esf: Vec<f32> = sum.iter().zip(&cnt).map(|(s, &c)| (s / c as f64) as f32).collect();
