@@ -75,7 +75,7 @@ impl SmartCompare {
 fn key_of(source_gen: u64, p: &SmartParams) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     source_gen.hash(&mut h);
-    for v in [p.cutoff, p.peak, p.limb_protection] {
+    for v in [p.cutoff, p.peak, p.limb_protection, p.limb_width] {
         v.to_bits().hash(&mut h);
     }
     (p.adaptive, p.include_sky, p.protect_highlights, p.color as u8).hash(&mut h);

@@ -676,6 +676,7 @@ impl PlanetaryStudio {
             deconv: auto.deconv,
             denoise: auto.denoise,
             wavelet: auto.wavelet,
+            smart: auto.smart,
             dering: auto.dering,
             ..self.pipeline.clone()
         }
@@ -3018,9 +3019,8 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
             settle(harness);
+            // The full automatic, learned final sharpening included.
             harness.state_mut().apply_auto_all();
-            // And the final sharpening's own automatic: the learned curve.
-            harness.state_mut().apply_auto_module(Stage::Smart);
             let app = harness.state_mut();
             app.prefs.current_area = "Nitidezza".into();
             app.prefs.expanded = [Stage::Smart].into();

@@ -1137,6 +1137,15 @@ fn learned_why(ui: &mut Ui, p: &SmartParams, analysis: &Analysis) {
                 line(ui, tr!("Su quelle dimensioni la curva rinforza ×{:.1}–{:.1}", "At those sizes the curve boosts ×{:.1}–{:.1}", gain(hi), gain(lo)));
             }
         }
+        if let Some(b) = analysis.bands.as_ref().filter(|b| b.storms > 0.0) {
+            line(ui, tr!("Dettaglio che attraversa le bande (tempeste, festoni): {:.0} %", "Detail breaking across the bands (storms, festoons): {:.0} %", b.storms * 100.0));
+        }
+        if let Some(d) = analysis.red_spot {
+            line(ui, tr!("Macchia Rossa: {d:.0} px, rinforzata ×{:.1}", "Great Red Spot: {d:.0} px, boosted ×{:.1}", gain(2.0 * d)));
+        }
+        if let Some(r) = analysis.rings {
+            line(ui, tr!("Anelli: {:.0} px; divisione di Cassini profonda {:.0} %", "Rings: {:.0} px; Cassini division {:.0} % deep", 2.0 * r.outer, r.cassini * 100.0));
+        }
         let size = analysis.subject_size;
         let colour = if analysis.colour { tl("a colori") } else { tl("in bianco e nero") };
         let body = analysis.planet.map_or(String::new(), |b| format!("{}, ", b.label()));
@@ -1159,6 +1168,10 @@ fn learned_why(ui: &mut Ui, p: &SmartParams, analysis: &Analysis) {
                 ps_core::learned::Factor::Size => tl("La grandezza del soggetto"),
                 ps_core::learned::Factor::Colour => tl("Colore o bianco e nero"),
                 ps_core::learned::Factor::Subject => tl("Il tipo di soggetto"),
+                ps_core::learned::Factor::Bands => tl("Le bande del pianeta"),
+                ps_core::learned::Factor::Storms => tl("Tempeste e festoni"),
+                ps_core::learned::Factor::RedSpot => tl("La Macchia Rossa"),
+                ps_core::learned::Factor::Rings => tl("Anelli e divisione di Cassini"),
             };
             line(ui, tr!("{name}: picco {}, strutture grandi {}", "{name}: peak {}, broad structures {}", percent(peak), percent(broad)));
         }
@@ -2240,16 +2253,22 @@ fn mask_tools(
 // ---- noise, contrast, tone -----------------------------------------------------------------
 
 pub fn denoise_body(ui: &mut Ui, p: &mut NoiseParams, mono: bool, why: Option<&[String]>) {
-    segmented(ui, &mut p.method, &[(NoiseMethod::Planetary, Some(ICON_PUBLIC), tl("Pianeti")), (NoiseMethod::Lunar, Some(ICON_NIGHTLIGHT), tl("Luna e Sole"))]);
+    segmented(
+        ui,
+        &mut p.method,
+        &[(NoiseMethod::Learned, Some(ICON_NEUROLOGY), tl("Appreso")), (NoiseMethod::Planetary, Some(ICON_PUBLIC), tl("Pianeti")), (NoiseMethod::Lunar, Some(ICON_NIGHTLIGHT), tl("Luna e Sole"))],
+    );
     hint(
         ui,
         match p.method {
+            NoiseMethod::Learned if !ps_core::denoise_net::available() => tl("Pesi del modello non presenti in questa versione: si usa il metodo Pianeti."),
+            NoiseMethod::Learned => tl("Rete addestrata su stack planetari simulati: riconosce bande, crateri e granulazione e toglie solo il rumore."),
             NoiseMethod::Planetary => tl("Wavelet multiscala: toglie la grana fine senza intaccare bande e dettagli morbidi."),
             NoiseMethod::Lunar => tl("Filtro che rispetta i bordi: pulisce le zone piatte e lascia netti crateri e granulazione."),
         },
     );
     ParamSlider::new(tl("Intensità"), &mut p.strength, 0.0..=3.0, 0.0).help(tl("In multipli del rumore misurato sull'immagine (1 = standard)")).show(ui);
-    if p.method == NoiseMethod::Lunar {
+    if p.method != NoiseMethod::Planetary {
         ParamSlider::new(tl("Dettaglio"), &mut p.detail, 0.0..=1.0, 0.3).help(tl("Quanta trama fine restituire dopo la pulizia")).show(ui);
     }
     if !mono {

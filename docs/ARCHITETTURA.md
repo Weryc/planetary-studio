@@ -1131,6 +1131,84 @@ fondo 0,01. Le degradate si rigenerano identiche (`ml_common::degrade`); si salv
 - **Aperto.** Luna: con R, G, B no (frange), ma anche in luminanza la curva piena lascia più grana di BXT; serve il
   gruppo 3 (mappe per zona, riferimenti LRO).
 
+### Nitidezza appresa, gruppo 3: zone, misure del pianeta, automatico (13 novembre 2026)
+
+- **Mappe per zona: provate, non adottate.** Sulle grezze vere la nostra curva aggiunge vicino a bordo e poli più
+  dettaglio fine di BXT rispetto al centro (`ps-io/examples/ml_zone_real.rs`: anello esterno / centro 0,68 contro
+  0,53 su Giove EdgeHD; 0,41 contro 0,30 su 2R0009). Tre rimedi misurati anche sulle simulate (`ml_zone.rs`, errore
+  per zona, 36 casi): (1) pesare gli strati con il rumore correlato (`Decomposition::noise`) invece di quello bianco
+  in «Segui le zone»: nessun effetto su entrambe; (2) un fondo di rumore misurato sull'immagine (20° percentile
+  dell'energia locale sulla parte illuminata, per strato): k=1 porta le grezze al livello di BXT ma alza l'errore al
+  centro da 0,50 a 0,67 (toglie dettaglio vero), k=0,15–0,3 non basta; (3) protezione del bordo più larga
+  (×4–6) e più forte (0,6–0,9): aiuta Saturno, poco Giove, peggiora l'anello esterno sulle simulate (0,56 → 0,62).
+  Conclusione: la grana vicino al bordo delle grezze viene dallo stacking (allineamento peggiore al bordo), che la
+  simulazione non contiene, quindi non si impara dal riferimento. Per ora resta la mano dell'utente (maschere con la
+  loro nitidezza). Idea per dopo: simulare anche quello (punti di allineamento, qualità che cala verso il bordo).
+- **Le bande come dati del modello.** `learned::FEATURES` = 29: presenza delle bande, ln(larghezza mediana × taglio)
+  (quanti periodi di dettaglio), numero/10; fattore `Factor::Bands` («Le bande del pianeta») nella spiegazione.
+  Esempi rigenerati (`target/ml_lucky2`, bande misurate su 243 dei 549). Errore curva escludendo un riferimento:
+  0,630 contro 0,646 (Saturno 0,874 contro 0,923; Giove fermo, lo spettro lo diceva già); serate 0,592/0,608/0,457.
+  Sulle immagini: 0,593 contro 0,596, Saturno 0,537 contro 0,563, pianeti 0,558 contro 0,566.
+- **La curva appresa nell'automatico completo.** `auto_pipeline_with` mette anche la nitidezza finale appresa
+  (forza dell'automatico, tetto 120 %; neutra se il modello non risponde) e `auto_all` la usa: misura quanto hanno
+  già fatto deconvoluzione e wavelet e aggiunge solo ciò che manca per arrivare alla curva, pulendo la grana oltre il
+  taglio. Non si ricavano i guadagni delle wavelet dalla curva (già fallito: guadagni alternati). `real_tests` ha la
+  colonna «auto senza appresa»: su Giove 2R0009 bande nettamente più contrastate, Luna e Saturno senza aloni.
+- **Correzioni.** `with_structure` aggiorna anche le curve apprese (e lascia cadere una serata scelta che non c'è
+  più); i nomi delle schede si rimpiccioliscono invece di essere tagliati; i pacchetti passano da
+  `packaging/private_paths.sh` (`--remap-path-prefix`) e l'exe Windows è strippato.
+
+### Nitidezza appresa, gruppo 3 (seguito): nuovi riferimenti, Macchia Rossa, tempeste, anelli, Cassini (13 novembre 2026)
+
+- **Riferimenti nuovi** (`Immagini_test/riferimenti/CREDITS.md`): Luna da LROC WAC global mosaic 100 m/px (due
+  riquadri da ~470 MB scaricati in `target/download_lro`, 8 ritagli da 300 km con `tiffcrop -k 1024` e larghezza
+  riportata con cos(latitudine): Copernico, Platone, Aristarco, Sinus Iridum, Posidonio, Aristotele, Manilio,
+  Taruntius), Sole in H-alfa da NSO/GONG 2048 px (3 giorni, disco ritagliato senza scritte), Marte Hubble 2003
+  (opo0322a; opo0322i scartato per la barra di occultazione). `ml_ref` tratta come superficie anche `sun*` e come
+  Marte `opo0322`. Esempi: `target/ml_g3`, 980 da 30 gruppi (prima 549 da 18).
+- **Misure del pianeta** (`ps-core/src/bands.rs`, in `Analysis`): `Bands::storms` = quota del dettaglio medio
+  (banda fra 1/60 e 1/20 del raggio) che varia lungo le bande invece che attraverso (tempeste, festoni, ovali;
+  0,05–0,15 su Giove); `red_spot` = diametro della macchia più rossa e compatta su Giove a colori (redness sopra
+  mediana + 0,6·(p99,5 − mediana), componente con allungamento < 2,5); `rings` = raggio esterno (globo × 2,27) e
+  profondità della divisione di Cassini a 0,876 del raggio esterno rispetto ad A (0,94) e B (0,80) sulle due anse.
+  Sulle grezze: Cassini 0–0,06 negli stack amatoriali, 0,26 su MPD; Macchia Rossa 22 px (EdgeHD), 54 px (Dob 16″).
+  Mostrate in «Perché questa curva». Test: `it_measures_the_cassini_division`, `it_finds_the_red_spot`.
+- **Nel modello: misurate ma senza peso, per ora.** `FEATURES` = 35 (tempeste, Macchia Rossa, anelli, Cassini).
+  Escludendo un riferimento alla volta (λ=10): con tutte 0,596 (Saturno 0,938, pianeti 0,533); senza le nuove 0,588
+  (0,881; 0,526); senza anelli e Cassini 0,592 (0,850; 0,540). Con 4 riferimenti di Saturno e 6 di Giove il modello
+  non le usa bene: il modello installato è addestrato con quelle colonne a zero (lo scaler le scarta), il codice le
+  passa già e con più riferimenti si riaddestra e basta.
+- **Risultato** (modello con i riferimenti nuovi): errore curva 0,630 → 0,588; superfici 0,485 → 0,452, pianeti
+  0,57 → 0,526; serate 0,515/0,540/0,441.
+
+### Nitidezza appresa, gruppo 4: bordo per soggetto, Saturno diviso, modelli per soggetto (13 novembre 2026)
+
+- **Verifica veloce** (`ps-io/examples/ml_fast.rs`): solo i soggetti chiesti, poche varianti per verità, il
+  modello applicato come l'automatico (forza fino a `LEARNED_CAP`, colore per soggetto, bordo per soggetto),
+  confronto solo sui casi a cui rispondono tutti i modelli; errore nel quadrato e, su Saturno, su globo e
+  anelli (maschere dalla verità). 20–100 s per Saturno/Giove; Luna e Sole sono lenti (20 min per una variante).
+  Il soggetto è quello vero, dal nome del riferimento (`ml_common::subject_of`): l'analisi sui riferimenti
+  scambia spesso Saturno per Giove o Marte e vede "Saturno" in Giove, Luna e Sole.
+  La verifica lenta (`ml_eval_ref`) dava Saturno "peggio di niente" perché usava la forza senza tetto: con il
+  tetto dell'app il modello su Saturno sta a 0,55–0,58.
+- **Protezione del bordo per soggetto** (`SmartParams::limb_width`, `preset::SATURN_LIMB` 0,45 × 2,
+  `PLANET_LIMB` 0,3 × 2): grana aggiunta al bordo rispetto al centro sulle grezze dell'utente da 0,42–0,51 a
+  0,37–0,41 su Saturno (BXT 0,38–0,41), da 0,42 a 0,38 su Giove; sulle simulate l'anello esterno peggiora
+  (0,585 → 0,67 Saturno, 0,398 → 0,41 pianeti), il centro no. Le simulate non hanno la grana dello stacking.
+- **Riferimenti nuovi**: Hubble OPAL heic2303d/e (Giove 2022–23), heic2312a, heic2113c, heic2612a_left
+  (Saturno). Esempi `target/ml_g4` (1089 da 35 gruppi). Il modello riallenato (λ=10) è installato: sui
+  riferimenti nuovi, mai visti da nessuno dei due, Giove 0,512 → 0,511, Saturno disco 0,600 → 0,560, globo
+  0,630 → 0,582; sui vecchi pianeti pari (0,535 contro 0,538–0,542).
+- **Saturno diviso, anelli più forti: non adottato.** Globo ×1 e anelli ×1,15/1,3/1,6: meglio su 3 Saturni
+  (heic2312a, opo2043a, heic2113c), peggio su 3 (PIA06193, heic1814b, heic1917a), pari su 2. Globo più debole
+  peggiora tutti tranne PIA06193 (Cassini a 72° di fase, geometria che da terra non si vede). Pulizia della
+  grana sul globo (`ml_saturn_real`): sulle grezze 1,06–1,57 volte la grana di BXT, la pulizia la abbassa solo
+  del 5–10 % e a occhio non cambia; sulle simulate costa poco. Non adottata. Idea per dopo: una curva appresa
+  propria per gli anelli (risposta Wiener misurata sulla sola zona degli anelli).
+- **Modelli per soggetto: non adottati.** Errore della curva: il modello "proprio" vince su Giove, Saturno,
+  Luna, Sole; sulle immagini il modello generale vince o pareggia ovunque (Giove 0,486 contro 0,552, Saturno
+  0,496 contro 0,627, Luna 0,729 contro 0,737, Sole e Marte pari). Un solo modello per tutti.
+
 ## 6. Interfaccia
 
 ```

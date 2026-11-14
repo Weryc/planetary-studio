@@ -344,6 +344,50 @@ fn main() {
         println!("serata {night:<11} modello della serata {:.3}, modello unico {:.3} ({} esempi)", mean(&own), mean(&main), own.len());
     }
 
+    // One model per subject (what the reference really shows), judged leaving out a group:
+    // the general model, a model trained on that subject only (at the chosen λ and at λ=100,
+    // steadier on few references), and the general one corrected by its mean error on that
+    // subject (shrunk when there are few references). Held-out answers for `ml_fast`.
+    let strong = methods.iter().position(|m| m.0 == "Lineare λ=100, da verità").unwrap();
+    let mut held_by: [String; 3] = Default::default();
+    println!("{:<8} {:>5} {:>9} {:>9} {:>9} {:>9}", "soggetto", "rif.", "generale", "proprio", "pr. λ100", "corretto");
+    for subject in ["Jupiter", "Saturn", "Mars", "Moon", "Sun"] {
+        let of: Vec<usize> = (0..rows.len()).filter(|&i| subject_of(&rows[i].group) == subject).collect();
+        let mine: Vec<&String> = groups.iter().filter(|g| subject_of(g) == subject).collect();
+        let mut errs = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for g in &mine {
+            let all_train: Vec<usize> = (0..rows.len()).filter(|&i| &rows[i].group != *g).collect();
+            let own_train: Vec<usize> = of.iter().copied().filter(|&i| &rows[i].group != *g).collect();
+            let general = (methods[best].2)(&samples(&rows, &all_train, methods[best].1), &rows);
+            let own = (methods[best].2)(&samples(&rows, &own_train, methods[best].1), &rows);
+            let own_strong = (methods[strong].2)(&samples(&rows, &own_train, methods[strong].1), &rows);
+            // The general model's mean error on this subject's training examples.
+            let mut bias = [0.0f32; STEPS];
+            let with_truth: Vec<usize> = own_train.iter().copied().filter(|&i| rows[i].wiener.is_some()).collect();
+            for &i in &with_truth {
+                let p = general.predict(&rows[i]);
+                let w = clamp(rows[i].wiener.unwrap());
+                (0..STEPS).for_each(|k| bias[k] += (w[k] - p[k]) / with_truth.len() as f32);
+            }
+            let n = (mine.len() - 1) as f32;
+            let shrink = n / (n + 2.0);
+            for &i in of.iter().filter(|&&i| &rows[i].group == *g) {
+                let pg = general.predict(&rows[i]);
+                let answers = [pg, own.predict(&rows[i]), own_strong.predict(&rows[i]), clamp(std::array::from_fn(|k| pg[k] + shrink * bias[k]))];
+                if let Some(w) = rows[i].wiener {
+                    answers.iter().zip(errs.iter_mut()).for_each(|(p, e)| e.push((i, rms(p, &clamp(w)))));
+                }
+                for (h, p) in held_by.iter_mut().zip(&answers[1..]) {
+                    writeln!(h, "{}\t{}\t{}", rows[i].name, rows[i].variant, p.map(|v| format!("{v:.4}")).join("\t")).unwrap();
+                }
+            }
+        }
+        println!("{subject:<8} {:>5} {:>9.3} {:>9.3} {:>9.3} {:>9.3}", mine.len(), mean(&errs[0]), mean(&errs[1]), mean(&errs[2]), mean(&errs[3]));
+    }
+    for (h, tag) in held_by.iter().zip(["own", "own100", "corrected"]) {
+        std::fs::write(format!("{report}.{tag}.heldout.tsv"), h).unwrap();
+    }
+
     let mut json = String::from("{\n\"methods\": [\n");
     for (m, ((name, teacher, _), s)) in methods.iter().zip(&scores).enumerate() {
         let kinds_text: Vec<String> = kinds.iter().map(|k| format!("\"{k}\": [{:.4}, {:.4}]", by_kind(&s.truth, k), by_kind(&s.teacher, k))).collect();

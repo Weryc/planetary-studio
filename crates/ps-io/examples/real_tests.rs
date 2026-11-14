@@ -1,6 +1,6 @@
 //! Side-by-side strips of real images under the automatic processing, to see how deconvolution
-//! and wavelets behave: original | automatic (free scales) | automatic (classic scales) |
-//! deconvolution only | wavelets only. Each strip is cropped around the subject, enlarged
+//! and wavelets behave: original | automatic (free scales) | automatic without the learned final
+//! sharpening | automatic (classic scales) | deconvolution only | wavelets only. Each strip is cropped around the subject, enlarged
 //! for small subjects, and stretched like the original. Prints the settings used and a few
 //! numbers per variant: dark rim outside the limb (ringing) and grain in the sky.
 //!
@@ -33,9 +33,11 @@ fn main() {
 
         let free = auto_pipeline_with(a.kind, &a, AutoStrength::Normal, ScaleMode::Free);
         let classic = auto_pipeline_with(a.kind, &a, AutoStrength::Normal, ScaleMode::Dyadic);
-        let mut deconv_only = free.clone();
+        let mut without_smart = free.clone();
+        without_smart.smart.enabled = false;
+        let mut deconv_only = without_smart.clone();
         (deconv_only.denoise.enabled, deconv_only.wavelet.enabled, deconv_only.dering.enabled) = (false, false, false);
-        let mut wavelets_only = free.clone();
+        let mut wavelets_only = without_smart.clone();
         (wavelets_only.deconv.enabled, wavelets_only.denoise.enabled, wavelets_only.dering.enabled) = (false, false, false);
         println!(
             "{stem}: {:?} {}×{} limbσ {:?} cut {:?} | psf {:?} it {} | free first {:.2} gains {:?} | classic gains {:?}",
@@ -76,6 +78,7 @@ fn main() {
             vec![
                 ("originale".to_string(), (*img).clone()),
                 ("auto libere".to_string(), run(&img, &free)),
+                ("auto senza appresa".to_string(), run(&img, &without_smart)),
                 ("auto classiche".to_string(), run(&img, &classic)),
                 ("solo deconv".to_string(), run(&img, &deconv_only)),
                 ("solo wavelet".to_string(), run(&img, &wavelets_only)),

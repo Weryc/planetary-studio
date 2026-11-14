@@ -4,7 +4,9 @@
 //!
 //! The model looks at a handful of numbers ([`features`]): where the detail ends, how the
 //! spectrum falls towards it, the signal-to-noise ratio at several sizes of detail, the size of
-//! the subject, colour or mono, the kind of subject and the body. It answers with the wanted
+//! the subject, colour or mono, the kind of subject and the body, and what the planet shows
+//! ([`crate::bands`]): how wide its belts and zones are, how much storms break across them,
+//! Jupiter's Great Red Spot, Saturn's rings and the depth of the Cassini division. It answers with the wanted
 //! gain at fixed multiples of the cut-off ([`GRID`]), in log units, from the broad structures
 //! (bands, a tenth of the cut-off) to past the finest detail.
 //!
@@ -39,12 +41,12 @@ pub const GRID: [f32; STEPS] = [0.1, 0.15, 0.25, 0.35, 0.5, 0.7, 0.85, 1.0, 1.15
 pub const STEPS: usize = 14;
 
 /// Number of [`features`].
-pub const FEATURES: usize = 26;
+pub const FEATURES: usize = 35;
 
 /// Names of the features, in order (for the study tools).
 pub const FEATURE_NAMES: [&str; FEATURES] = [
     "ln_cutoff", "slope", "sigma_x_cutoff", "noise_blur", "misfit", "snr_0.5", "snr_0.7", "snr_1.0", "snr_1.4", "snr_2.0", "pow_0.25", "pow_1.0", "pow_1.4", "pow_2.0", "ln_elements", "ln_snr",
-    "colour", "planet", "saturn", "full_disk", "surface", "jupiter", "saturn_body", "mars", "moon", "sun",
+    "colour", "planet", "saturn", "full_disk", "surface", "jupiter", "saturn_body", "mars", "moon", "sun", "bands", "ln_band_width", "band_count", "storms", "red_spot", "ln_red_spot", "rings", "ln_rings", "cassini",
 ];
 
 /// What the model looks at, from the analysis alone (the body is the one the pixels suggest),
@@ -87,7 +89,28 @@ pub fn features(analysis: &Analysis) -> Option<[f32; FEATURES]> {
         flag(body == Some(Body::Mars)),
         flag(body == Some(Body::Moon)),
         flag(body == Some(Body::Sun)),
+        // The belts and zones measured on the image: their typical width in resolution
+        // elements (how many cut-off periods), and how many there are.
+        flag(analysis.bands.is_some()),
+        band_width(analysis).map_or(0.0, |w| (w * c).max(0.1).ln()),
+        analysis.bands.as_ref().map_or(0.0, |b| (b.dark.len() + b.bright.len()) as f32 / 10.0),
+        // Storms, festoons and ovals breaking across the bands; the Great Red Spot and Saturn's
+        // rings in resolution elements; how deep the Cassini division comes out.
+        analysis.bands.as_ref().map_or(0.0, |b| b.storms),
+        flag(analysis.red_spot.is_some()),
+        analysis.red_spot.map_or(0.0, |d| (d * c).max(0.1).ln()),
+        flag(analysis.rings.is_some()),
+        analysis.rings.map_or(0.0, |r| (r.outer * c).max(0.1).ln()),
+        analysis.rings.map_or(0.0, |r| r.cassini),
     ])
+}
+
+/// Median width (px) of the belts and zones, when measured.
+fn band_width(analysis: &Analysis) -> Option<f32> {
+    let b = analysis.bands.as_ref()?;
+    let mut all: Vec<f32> = b.dark.iter().chain(&b.bright).copied().collect();
+    all.sort_by(f32::total_cmp);
+    all.get(all.len() / 2).copied()
 }
 
 /// Largest gain the model may ask for (ln), as in training.
@@ -212,6 +235,14 @@ pub enum Factor {
     Colour,
     /// Kind of subject and body.
     Subject,
+    /// The belts and zones measured on a banded globe.
+    Bands,
+    /// Detail breaking across the bands: storms, festoons, ovals.
+    Storms,
+    /// Jupiter's Great Red Spot.
+    RedSpot,
+    /// Saturn's rings and the Cassini division.
+    Rings,
 }
 
 impl Factor {
@@ -222,11 +253,15 @@ impl Factor {
             1 | 4 | 10..=13 => Factor::Spectrum,
             14 => Factor::Size,
             16 => Factor::Colour,
+            26..=28 => Factor::Bands,
+            29 => Factor::Storms,
+            30 | 31 => Factor::RedSpot,
+            32..=34 => Factor::Rings,
             _ => Factor::Subject,
         }
     }
 
-    pub const ALL: [Factor; 6] = [Factor::Cutoff, Factor::Noise, Factor::Spectrum, Factor::Size, Factor::Colour, Factor::Subject];
+    pub const ALL: [Factor; 10] = [Factor::Cutoff, Factor::Noise, Factor::Spectrum, Factor::Size, Factor::Colour, Factor::Subject, Factor::Bands, Factor::Storms, Factor::RedSpot, Factor::Rings];
 }
 
 /// Why the curve is what it is: the model's answer split, against an average training image,

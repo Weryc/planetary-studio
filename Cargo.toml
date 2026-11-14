@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/ps-core", "crates/ps-io", "crates/ps-app"]
+members = ["crates/ps-core", "crates/ps-io", "crates/ps-app", "crates/ps-train"]
+# ps-train pulls in candle: it builds only when asked (`-p ps-train`).
+default-members = ["crates/ps-core", "crates/ps-io", "crates/ps-app"]
 
 [workspace.package]
 version = "0.3.0"

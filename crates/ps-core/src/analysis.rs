@@ -95,6 +95,10 @@ pub struct Analysis {
     pub colour: bool,
     /// The belts and zones of a banded globe (Jupiter, Saturn), when they are clear.
     pub bands: Option<crate::bands::Bands>,
+    /// Jupiter's Great Red Spot, diameter in pixels (colour images).
+    pub red_spot: Option<f32>,
+    /// Saturn's rings: outer size and how deep the Cassini division is.
+    pub rings: Option<crate::bands::Rings>,
 }
 
 pub fn analyze(img: &Image) -> Analysis {
@@ -112,7 +116,7 @@ pub fn analyze(img: &Image) -> Analysis {
     // A subject inside the frame is aligned by centroids; a surface by correlation.
     let rgb_shift = align::estimate_by_centroid(img);
     let (psf_sigma, psf_moffat, channel_sigma, spectral, power, optics) = (None, None, None, None, Vec::new(), None);
-    let base = Analysis { kind: ImageKind::Planet, confidence: Confidence::Low, disk: None, noise, snr, psf_sigma, psf_moffat, channel_sigma, rgb_shift, subject_size: frame, spectral, power, optics, planet: None, colour: !img.is_mono(), bands: None };
+    let base = Analysis { kind: ImageKind::Planet, confidence: Confidence::Low, disk: None, noise, snr, psf_sigma, psf_moffat, channel_sigma, rgb_shift, subject_size: frame, spectral, power, optics, planet: None, colour: !img.is_mono(), bands: None, red_spot: None, rings: None };
 
     // Subject running off the frame edges: a close-up or mosaic of an extended surface.
     let border = border_fraction(&mask, sw, sh);
@@ -173,7 +177,15 @@ pub fn analyze(img: &Image) -> Analysis {
         _ => None,
     };
     let bands = globe.and_then(|(g, search)| crate::bands::measure(&lum, w, h, g, search));
-    Analysis { kind, confidence, disk, planet, psf_sigma: fit.map(|f| f.sigma), psf_moffat: fit.and_then(|f| f.moffat), channel_sigma, subject_size: diameter, spectral, power, bands, ..base }
+    let red_spot = match (planet, disk) {
+        (Some(crate::capture::Body::Jupiter), Some(d)) => crate::bands::red_spot(img, d.cx, d.cy, d.radius),
+        _ => None,
+    };
+    let rings = match (kind, globe) {
+        (ImageKind::Saturn, Some((g, _))) => crate::bands::rings(&lum, w, h, g),
+        _ => None,
+    };
+    Analysis { kind, confidence, disk, planet, psf_sigma: fit.map(|f| f.sigma), psf_moffat: fit.and_then(|f| f.moffat), channel_sigma, subject_size: diameter, spectral, power, bands, red_spot, rings, ..base }
 }
 
 /// Which planet a lone disk probably is, from the pixels alone, or `None` when they don't
