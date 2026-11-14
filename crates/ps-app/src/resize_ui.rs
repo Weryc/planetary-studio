@@ -253,7 +253,10 @@ fn advanced(ui: &mut Ui, s: &mut ResizeSettings, (w, h): (usize, usize), kind: I
         ui.horizontal(|ui| {
             ui.label(RichText::new("Zoom").size(theme::size::SMALL).color(TEXT_WEAK));
             ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(60.0);
-            ui.add(egui::Slider::new(&mut preview.zoom, 1.0..=MAX_ZOOM).logarithmic(true).show_value(false)).on_hover_text(tl("Avvicina o allontana l'anteprima"));
+            let zoom = ui.add(egui::Slider::new(&mut preview.zoom, 1.0..=MAX_ZOOM).logarithmic(true).show_value(false)).on_hover_text(tl("Avvicina o allontana l'anteprima"));
+            if zoom.hovered() && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+                preview.zoom = 1.0;
+            }
             ui.label(RichText::new(format!("×{:.1}", preview.zoom)).size(theme::size::SMALL).color(TEXT));
             if ui.button((ICON_FIT_SCREEN.rich_text(), tl("Centra"))).on_hover_text(tl("Torna alla vista iniziale")).clicked() {
                 preview.zoom = 1.0;

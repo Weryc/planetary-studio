@@ -1209,6 +1209,37 @@ fondo 0,01. Le degradate si rigenerano identiche (`ml_common::degrade`); si salv
   Luna, Sole; sulle immagini il modello generale vince o pareggia ovunque (Giove 0,486 contro 0,552, Saturno
   0,496 contro 0,627, Luna 0,729 contro 0,737, Sole e Marte pari). Un solo modello per tutti.
 
+## 5tervicies. Riduzione del rumore appresa (14 novembre 2026)
+
+- **Dove**: dopo la deconvoluzione e prima di wavelet e nitidezza intelligente, un solo passaggio (l'arresto
+  automatico di R-L è tarato sul rumore presente; il 40 % degli esempi d'addestramento ha rumore già
+  affilato, quindi la rete regge quello dopo la deconvoluzione; un secondo passaggio dopo la nitidezza
+  sarebbe doppio con "Grana" e con la nitidezza intelligente).
+- **Rete** (`ps-core/src/denoise_net.rs`): piccola U-Net, 13 convoluzioni 3×3 (16/32/64 canali, due
+  dimezzamenti, salti), ~146 mila pesi in `denoise_weights.bin` (584 KB, `include_bytes!`, formato `PSDN0001`).
+  Ingressi: luminanza normalizzata al 99,5° percentile, dettaglio `(y − G₁px y)/σ`, piano costante 30·σ.
+  Uscita: rumore in unità di σ; `pulita = y − uscita·σ·Intensità`. σ è la stima dell'app
+  (`wavelet::estimate_noise`). Senza il terzo ingresso (dettaglio) la rete non imparava: rumore 0,003 accanto
+  a segnale 1 non si vede. Inferenza su CPU, tasselli 512 con margine 48, ~0,3 s/MP (Luna 3888×2200 3,3 s).
+  Se il file dei pesi è vuoto `available()` è falso e si usa il metodo Pianeti.
+- **Addestramento** (`crates/ps-train`, fuori dai membri predefiniti, candle su Metal): stack puliti simulati
+  dai riferimenti nitidi con il seeing di `ml_common` (366, `denoise_data`); rumore generato al volo (SNR
+  60–3000, quota fotonica 0–0,8, grana correlata 0,3–1,1 px nel 70 %, piedistallo del cielo, 40 % affilato
+  insieme alla verità). L1 in unità di σ, AdamW 1e-3 con coseno, 24 000 passi da 16 tasselli 96²
+  (~1 h 50 su M-series). Gruppi tenuti da parte: heic1708a, heic2017a, heic2404b, moon_lro_copernico,
+  moon_lro_taruntius, opo0322a, sun_gong_20261106.
+- **Risultati** (errore RMS ×1000 sui gruppi tenuti da parte):
+
+  | | rumoroso | rete | Pianeti (starlet) | Luna e Sole (bilaterale) |
+  |---|---|---|---|---|
+  | pianeti (90) | 2,600 | **1,396** | 2,225 | 2,184 |
+  | Luna e Sole (150) | 2,584 | **1,473** | 2,807 | 2,055 |
+
+  A occhio (`denoise_compare`, `target/denoise_cmp`): su Giove, Saturno e Luna la parte tolta è grana senza
+  struttura; sul Sole in Hα (MalVeauX, σ 5 volte più alto) toglie molto e nella parte tolta si vedono tratti
+  curvi simili alle fibrille: lì conviene abbassare l'Intensità o alzare il Dettaglio.
+- **Automatico** (`preset::auto_noise`): metodo Appreso, Intensità 1 (Saturno 0,9) × pulizia, Dettaglio 0,1.
+
 ## 6. Interfaccia
 
 ```

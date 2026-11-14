@@ -178,7 +178,7 @@ struct Flags {
 fn flags(executable: &Path) -> Flags {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Flags>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(f) = cache.lock().unwrap().get(executable) {
+    if let Some(f) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(executable) {
         return *f;
     }
     let help = Command::new(executable)
@@ -192,7 +192,7 @@ fn flags(executable: &Path) -> Flags {
     } else {
         Flags { no_auto_psf: "--no-auto-nonstellar-radius", psf_size: "--nonstellar-radius", takes_radius: true, lunar_planetary: false }
     };
-    cache.lock().unwrap().insert(executable.to_path_buf(), f);
+    cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(executable.to_path_buf(), f);
     f
 }
 

@@ -29,9 +29,9 @@ fn main() {
     let n = cols.len();
     let mut out = vec![vec![0.0f32; w * n * h]; 3];
     for (k, c) in cols.iter().enumerate() {
-        for ch in 0..3 {
+        for (out_plane, plane) in out.iter_mut().zip(c.channels()) {
             for y in 0..h {
-                out[ch][y * w * n + k * w..y * w * n + (k + 1) * w].copy_from_slice(&c.channels()[ch][y * w..(y + 1) * w]);
+                out_plane[y * w * n + k * w..y * w * n + (k + 1) * w].copy_from_slice(&plane[y * w..(y + 1) * w]);
             }
         }
     }

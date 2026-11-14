@@ -14,6 +14,8 @@ pub mod dering;
 pub mod enhance;
 pub mod ephemeris;
 pub mod bands;
+pub mod blend;
+pub mod blur;
 pub mod learned;
 mod learned_data;
 pub mod lunarmap;

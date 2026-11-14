@@ -94,28 +94,7 @@ pub fn render(dem: &Dem, v: &MoonView, n: usize) -> (Vec<f32>, Vec<bool>) {
 
 /// Gaussian blur (separable, reflected edges).
 fn blur(img: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
-    let r = (3.0 * sigma).ceil() as isize;
-    let k: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
-    let norm: f32 = k.iter().sum();
-    let k: Vec<f32> = k.iter().map(|v| v / norm).collect();
-    let refl = |i: isize, n: usize| -> usize {
-        let n = n as isize;
-        let m = i.rem_euclid(2 * n);
-        (if m < n { m } else { 2 * n - 1 - m }) as usize
-    };
-    let mut tmp = vec![0.0f32; w * h];
-    tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for (x, o) in row.iter_mut().enumerate() {
-            *o = k.iter().enumerate().map(|(t, kv)| kv * img[y * w + refl(x as isize + t as isize - r, w)]).sum();
-        }
-    });
-    let mut out = vec![0.0f32; w * h];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for (x, o) in row.iter_mut().enumerate() {
-            *o = k.iter().enumerate().map(|(t, kv)| kv * tmp[refl(y as isize + t as isize - r, h) * w + x]).sum();
-        }
-    });
-    out
+    crate::blur::gaussian_blur(img, w, h, sigma, crate::blur::Edge::Reflect)
 }
 
 /// The relief's shading only: log brightness, band-passed, divided by its local size.

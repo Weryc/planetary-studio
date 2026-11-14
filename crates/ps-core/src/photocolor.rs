@@ -48,13 +48,13 @@ fn encode(v: f32) -> f32 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reference {
     /// Cassini narrow-angle camera map, December 2000 (colours close to the eye's, lively).
-    #[default]
     Cassini2000,
     /// Hubble OPAL 2019 in red, green and blue filters (631, 547, 467 nm) calibrated to reflectance:
     /// physical colours, pale. (`HubbleNatural2019` was its name in the first version.)
     #[serde(alias = "HubbleNatural2019")]
     Hubble2019,
     /// The same from Hubble OPAL 2021 (631, 502, 467 nm).
+    #[default]
     Hubble2021,
 }
 

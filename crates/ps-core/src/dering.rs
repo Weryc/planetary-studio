@@ -231,16 +231,8 @@ fn along_blur(plane: &[f32], w: usize, h: usize, across: &[[f32; 2]], sigma: f32
 
 /// `plane` at (x, y), pixel centres at half-integers; `None` outside.
 fn bilinear(plane: &[f32], w: usize, h: usize, x: f32, y: f32) -> Option<f32> {
-    let (x, y) = (x - 0.5, y - 0.5);
-    if x < 0.0 || y < 0.0 || x > (w - 1) as f32 || y > (h - 1) as f32 {
-        return None;
-    }
-    let (x0, y0) = (x.floor() as usize, y.floor() as usize);
-    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-    let (tx, ty) = (x - x0 as f32, y - y0 as f32);
-    let top = plane[y0 * w + x0] * (1.0 - tx) + plane[y0 * w + x1] * tx;
-    let bottom = plane[y1 * w + x0] * (1.0 - tx) + plane[y1 * w + x1] * tx;
-    Some(top * (1.0 - ty) + bottom * ty)
+    let inside = x >= 0.5 && y >= 0.5 && x - 0.5 <= (w - 1) as f32 && y - 0.5 <= (h - 1) as f32;
+    inside.then(|| crate::image::bilinear_clamped(plane, w, h, x, y))
 }
 
 /// Least-squares parabola v = a + b·t + c·t² through `points` (t, v): (a, b, c, rms misfit).
@@ -445,15 +437,7 @@ pub fn dering(sharp: &Image, p: &DeringParams, area: &[f32], ring: Option<&Ring>
 
 /// Gaussian blur (σ px) of a small plane, the borders extended.
 fn blur(plane: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
-    let rows: Vec<f32> = plane.par_chunks(w).flat_map_iter(|row| gaussian_1d(row, sigma)).collect();
-    let mut cols = vec![0.0f32; w * h];
-    let done: Vec<Vec<f32>> = (0..w).into_par_iter().map(|x| gaussian_1d(&(0..h).map(|y| rows[y * w + x]).collect::<Vec<_>>(), sigma)).collect();
-    for (x, col) in done.iter().enumerate() {
-        for (y, v) in col.iter().enumerate() {
-            cols[y * w + x] = *v;
-        }
-    }
-    cols
+    crate::blur::gaussian_blur(plane, w, h, sigma, crate::blur::Edge::Clamp)
 }
 
 /// The disk deconvolution's anti-ringing area follows: Saturn's globe (from the rings'
@@ -617,14 +601,6 @@ pub(crate) fn min_max_cpu(plane: &[f32], w: usize, h: usize, r: usize) -> (Vec<f
     (lo, hi)
 }
 
-/// Gaussian smoothing of a row (σ in samples), the ends extended.
-fn gaussian_1d(row: &[f32], sigma: f32) -> Vec<f32> {
-    let r = (3.0 * sigma).ceil() as i32;
-    let kernel: Vec<f32> = (-r..=r).map(|k| (-(k as f32).powi(2) / (2.0 * sigma * sigma)).exp()).collect();
-    let total: f32 = kernel.iter().sum();
-    let n = row.len() as i32;
-    (0..n).map(|i| (-r..=r).zip(&kernel).map(|(k, g)| g * row[(i + k).clamp(0, n - 1) as usize]).sum::<f32>() / total).collect()
-}
 
 
 #[cfg(test)]

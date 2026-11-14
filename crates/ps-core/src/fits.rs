@@ -135,8 +135,9 @@ fn flip_vertical(plane: &[f32], width: usize, height: usize) -> Vec<f32> {
     plane.chunks_exact(width).rev().take(height).flatten().copied().collect()
 }
 
-/// Encode as a 32-bit float FITS (rows stored bottom-up, as [`read`] expects).
-pub fn write_f32(img: &Image) -> Vec<u8> {
+/// Encode as a 32-bit float FITS (rows stored bottom-up, as [`read`] expects). Used by the tests.
+#[cfg(test)]
+fn write_f32(img: &Image) -> Vec<u8> {
     let (w, h) = (img.width(), img.height());
     let mut cards = vec![
         format!("{:<8}= {:>20}", "SIMPLE", "T"),

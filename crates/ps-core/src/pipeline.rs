@@ -16,6 +16,7 @@ use crate::i18n::tl;
 use crate::Image;
 use crate::adjust::{ColorParams, MineralParams, apply_color, apply_mineral};
 use crate::align::{self, AlignParams};
+use crate::blend::{self, BlendMode};
 use crate::bxt::{self, BxtParams};
 use crate::color::{merge_planes, working_planes};
 use crate::deconv::{DeconvParams, DeconvReport, PlaneOptions, deconvolve_plane_with};
@@ -76,8 +77,13 @@ pub enum LayerRole {
     Moons,
 }
 
-/// A region of the image with its own finishing settings. A disabled sub-module means
-/// "same as the whole image".
+/// A region of the image with its own finishing settings.
+///
+/// Two ways to work, by [`Layer::additive`]. A mask made by the user is additive, like an
+/// adjustment layer: it starts with nothing and what is switched on is applied on top of the
+/// result so far, laid over it in the layer's [`BlendMode`]. The older kind (the rings' and
+/// moons' masks, and files saved before) redoes the finishing with its own settings instead of
+/// the whole image's: there, a disabled sub-module means "same as the whole image".
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
     pub id: u64,
@@ -87,6 +93,12 @@ pub struct Layer {
     #[serde(default)]
     pub role: Option<LayerRole>,
     pub mask: MaskSpec,
+    /// Works on top of the result so far instead of replacing the whole image's settings.
+    #[serde(default)]
+    pub additive: bool,
+    /// How the adjusted region is laid over what is below it.
+    #[serde(default)]
+    pub blend: BlendMode,
     #[serde(default)]
     pub denoise: Module<NoiseParams>,
     pub wavelet: Module<WaveletParams>,
@@ -155,21 +167,27 @@ impl Default for Pipeline {
 }
 
 impl Pipeline {
-    /// New layer starting from the global settings, with its own wavelets switched on.
+    /// New additive layer: no adjustment switched on, and each one starts from nothing (the
+    /// wavelets keep the whole image's scales, with every amount at zero).
     pub fn add_layer(&mut self, name: &str, mask: MaskSpec) -> u64 {
         let id = self.layers.iter().map(|l| l.id).max().map_or(1, |m| m + 1);
+        let mut wavelet = self.wavelet.params.clone();
+        wavelet.layers.iter_mut().for_each(|l| *l = Default::default());
+        (wavelet.amplify, wavelet.grain_denoise) = (1.0, 0.0);
         self.layers.push(Layer {
             id,
             name: name.to_string(),
             enabled: true,
             role: None,
             mask,
-            denoise: Module::off(self.denoise.params.clone()),
-            wavelet: Module::on(self.wavelet.params.clone()),
-            contrast: Module::off(self.contrast.params.clone()),
-            smart: Module::off(self.smart.params.clone()),
-            tone: Module::off(self.tone.params.clone()),
-            color: Module::off(self.color.params.clone()),
+            additive: true,
+            blend: BlendMode::Normal,
+            denoise: Module::off(NoiseParams { strength: 0.0, chroma: 0, sky: 0.0, ..self.denoise.params.clone() }),
+            wavelet: Module::off(wavelet),
+            contrast: Module::off(ContrastParams { amount: 0.0, local_amount: 0.0, ..self.contrast.params.clone() }),
+            smart: Module::off(SmartParams { strength: 0.0, ..self.smart.params.clone() }),
+            tone: Module::off(ToneParams::default()),
+            color: Module::off(ColorParams::default()),
         });
         id
     }
@@ -285,7 +303,7 @@ impl Stage {
             Stage::Deconv => tl("Deconvoluzione"),
             Stage::Denoise => tl("Riduzione rumore"),
             Stage::Wavelet => "Wavelet",
-            Stage::Smart => tl("Nitidezza finale"),
+            Stage::Smart => tl("Nitidezza intelligente"),
             Stage::Contrast => tl("Contrasto"),
             Stage::Dering => "Dering",
             Stage::Tone => tl("Livelli tonali"),
@@ -487,7 +505,10 @@ pub struct Processor {
     color: Option<Slot<ColorParams>>,
     photocolor: Option<Slot<PhotoColorParams>>,
     layers: HashMap<u64, Option<Slot<LayerKey>>>,
-    blend: Option<Slot<Vec<(u64, u64)>>>,
+    blend: Option<Slot<Vec<(u64, u64, BlendMode)>>>,
+    /// The additive layers: their adjusted image, and that laid over what is below.
+    add_layers: HashMap<u64, Option<Slot<LayerKey>>>,
+    add_blend: HashMap<u64, Option<Slot<(u64, u64, BlendMode)>>>,
     mineral: Option<Slot<(MineralParams, u64)>>,
     suncolor: Option<Slot<SunColorParams>>,
     gamut: Option<Slot<()>>,
@@ -686,9 +707,11 @@ impl Processor {
         // ---- layers ----
         let start = Instant::now();
         let mut recomputed = false;
-        let mut parts: Vec<(Frame, Arc<Vec<f32>>, u64)> = Vec::new();
+        let mut parts: Vec<(Frame, Arc<Vec<f32>>, u64, BlendMode)> = Vec::new();
         self.layers.retain(|id, _| p.layers.iter().any(|l| l.id == *id));
-        for layer in p.layers.iter().filter(|l| l.enabled && l.overrides_any()) {
+        self.add_layers.retain(|id, _| p.layers.iter().any(|l| l.id == *id));
+        self.add_blend.retain(|id, _| p.layers.iter().any(|l| l.id == *id));
+        for layer in p.layers.iter().filter(|l| l.enabled && !l.additive && l.overrides_any()) {
             let Some((_, mask, mask_gen)) = aux.masks.iter().find(|(id, ..)| *id == layer.id) else {
                 continue;
             };
@@ -741,10 +764,11 @@ impl Processor {
                     store(slot, deconvolved.1, key, img)
                 }
             };
-            parts.push((out, Arc::clone(mask), *mask_gen));
+            parts.push((out, Arc::clone(mask), *mask_gen, layer.blend));
         }
+        let mut any_layer = !parts.is_empty();
         if !parts.is_empty() {
-            let key: Vec<(u64, u64)> = parts.iter().map(|(f, _, mask_gen)| (f.1, *mask_gen)).collect();
+            let key: Vec<(u64, u64, BlendMode)> = parts.iter().map(|(f, _, mask_gen, mode)| (f.1, *mask_gen, *mode)).collect();
             frame = match lookup(&self.blend, frame.1, &key) {
                 Some(hit) => hit,
                 None => {
@@ -753,6 +777,70 @@ impl Processor {
                     store(&mut self.blend, input_gen, key, blend(&frame.0, &parts))
                 }
             };
+        }
+        // The additive layers, in the order of the list, each over what is below it.
+        for layer in p.layers.iter().filter(|l| l.enabled && l.additive && l.overrides_any()) {
+            let Some((_, mask, mask_gen)) = aux.masks.iter().find(|(id, ..)| *id == layer.id) else {
+                continue;
+            };
+            let own = |m: bool, neutral: bool| m && !neutral;
+            let key = LayerKey {
+                denoise: Some(layer.denoise.params.clone()).filter(|d| own(layer.denoise.enabled, d.is_neutral())),
+                wavelet: Some(layer.wavelet.params.clone()).filter(|w| own(layer.wavelet.enabled, w.is_neutral())),
+                contrast: Some(layer.contrast.params.clone()).filter(|c| own(layer.contrast.enabled, c.is_neutral())),
+                smart: Some(layer.smart.params.clone()).filter(|s| own(layer.smart.enabled, s.is_neutral())).map(|s| {
+                    let mask_gen = subject.as_ref().filter(|_| !s.include_sky).map_or(0, |m| m.1);
+                    (s, mask_gen)
+                }),
+                dering: None,
+                tone: Some(layer.tone.params.clone()).filter(|t| own(layer.tone.enabled, t.is_neutral())),
+                color: Some(layer.color.params.clone()).filter(|c| colour && own(layer.color.enabled, c.is_neutral())),
+            };
+            if key.denoise.is_none() && key.wavelet.is_none() && key.contrast.is_none() && key.smart.is_none() && key.tone.is_none() && key.color.is_none() {
+                continue;
+            }
+            any_layer = true;
+            let slot = self.add_layers.entry(layer.id).or_default();
+            let adjusted = match lookup(slot, frame.1, &key) {
+                Some(hit) => hit,
+                None => {
+                    recomputed = true;
+                    let (mut img, generation) = match &key.denoise {
+                        Some(d) => (enhance::denoise(&frame.0, d), next_generation()),
+                        None => ((*frame.0).clone(), frame.1),
+                    };
+                    if let Some(w) = &key.wavelet {
+                        img = apply_wavelet(&mut self.decompositions, decompositions, &img, generation, w, cancel)?;
+                    }
+                    if let Some(c) = &key.contrast {
+                        img = enhance::contrast(&img, c);
+                    }
+                    if let Some((sp, _)) = &key.smart {
+                        let prepared = crate::smart::prepare(&img, None, sp);
+                        let subject_mask = subject.as_ref().filter(|m| !sp.include_sky && m.0.len() == img.width() * img.height());
+                        img = crate::smart::apply(&prepared, &img, sp, subject_mask.map(|m| m.0.as_slice()));
+                    }
+                    if let Some(t) = &key.tone {
+                        img = enhance::tone(&img, t);
+                    }
+                    if let Some(c) = &key.color {
+                        img = apply_color(&img, c);
+                    }
+                    store(slot, frame.1, key, img)
+                }
+            };
+            let blend_key = (adjusted.1, *mask_gen, layer.blend);
+            let slot = self.add_blend.entry(layer.id).or_default();
+            frame = match lookup(slot, frame.1, &blend_key) {
+                Some(hit) => hit,
+                None => {
+                    recomputed = true;
+                    let input_gen = frame.1;
+                    store(slot, input_gen, blend_key, blend::composite(&frame.0, &adjusted.0, mask, layer.blend))
+                }
+            };
+        }
+        if any_layer {
             timings.push(StageTiming { stage: Stage::Layers, elapsed: start.elapsed(), cached: !recomputed });
         }
 
@@ -809,6 +897,7 @@ impl Processor {
         self.color = None;
         self.photocolor = None;
         self.blend = None;
+        self.add_blend.clear();
         self.mineral = None;
         self.suncolor = None;
         self.gamut = None;
@@ -841,15 +930,12 @@ fn apply_wavelet(caches: &mut Vec<WaveletCache>, keep: usize, img: &Image, input
     Some(merge_planes(img, p.color, &cache.planes, processed))
 }
 
-/// `out = base·(1 − m) + layer·m`, one layer after the other.
-fn blend(base: &Image, parts: &[(Frame, Arc<Vec<f32>>, u64)]) -> Image {
+/// `out = base·(1 − m) + layer·m` (or the layer's blend mode instead of `layer`), one layer
+/// after the other.
+fn blend(base: &Image, parts: &[(Frame, Arc<Vec<f32>>, u64, BlendMode)]) -> Image {
     let mut channels = base.channels().to_vec();
-    for ((layer, _), mask, _) in parts {
-        channels.par_iter_mut().zip(layer.channels()).for_each(|(out, src)| {
-            for ((o, &s), &m) in out.iter_mut().zip(src).zip(mask.iter()) {
-                *o += m * (s - *o);
-            }
-        });
+    for ((layer, _), mask, _, mode) in parts {
+        blend::composite_into(&mut channels, layer.channels(), mask, *mode);
     }
     Image::new(base.width(), base.height(), channels, base.source_bit_depth)
 }
@@ -1051,6 +1137,43 @@ mod tests {
         let (inside, outside) = (px(5), px(35));
         assert!((inside[0] - inside[2]).abs() < 1e-5, "inside should be grey: {inside:?}");
         assert!((outside[0] - outside[2]).abs() > 0.05, "outside keeps colour: {outside:?}");
+    }
+
+    #[test]
+    fn additive_layer_starts_with_nothing_and_adds_on_top() {
+        let src = image();
+        let mut p = Pipeline::default();
+        p.deconv.enabled = false;
+        p.denoise.enabled = false;
+        p.wavelet.enabled = false;
+        p.smart.enabled = false;
+        // The whole image's result already has its colours pushed.
+        p.color.params.saturation = 1.3;
+        let shape = MaskShape::Rectangle { x: 0.0, y: 0.0, w: 20.0, h: 30.0 };
+        let id = p.add_layer("metà", MaskSpec::new(shape, 0.0));
+        assert!(p.layers[0].additive && !p.layers[0].overrides_any(), "nothing is switched on");
+        let mask = Arc::new(crate::mask::render(&p.layers[0].mask, &src));
+        let masks = [(id, mask, next_generation())];
+        let plain = {
+            let mut q = p.clone();
+            q.layers.clear();
+            run(&mut Processor::default(), &src, next_generation(), &q, &Aux::default())
+        };
+        let mut proc = Processor::default();
+        let untouched = run(&mut proc, &src, next_generation(), &p, &Aux { masks: &masks, ..Default::default() });
+        assert_eq!(untouched.image.channels(), plain.image.channels());
+        // Saturation 0 on top of the result: grey inside, the whole image's colour outside.
+        p.layer_mut(id).unwrap().color = Module::on(ColorParams { saturation: 0.0, ..Default::default() });
+        let out = run(&mut proc, &src, next_generation(), &p, &Aux { masks: &masks, ..Default::default() });
+        let px = |img: &Image, x: usize| [0, 1, 2].map(|c| img.channels()[c][15 * 40 + x]);
+        let inside = px(&out.image, 5);
+        assert!((inside[0] - inside[2]).abs() < 1e-5, "inside should be grey: {inside:?}");
+        assert_eq!(px(&out.image, 35), px(&plain.image, 35), "outside keeps the whole image's result");
+        // The blend mode counts: Multiply of a grey over the picture is darker than Normal.
+        let mut multiply = p.clone();
+        multiply.layer_mut(id).unwrap().blend = BlendMode::Multiply;
+        let dark = run(&mut proc, &src, next_generation(), &multiply, &Aux { masks: &masks, ..Default::default() });
+        assert!(px(&dark.image, 5)[0] <= px(&plain.image, 5)[0] + 1e-6 && px(&dark.image, 5) != inside);
     }
 
     #[test]

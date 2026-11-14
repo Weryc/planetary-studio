@@ -9,7 +9,7 @@ description = "Training of Planetary Studio's learned models (not part of the ap
 [dependencies]
 candle-core = { version = "0.11.1", features = ["metal"] }
 candle-nn = { version = "0.11.1", features = ["metal"] }
-ps-core = { version = "0.3.0", path = "../ps-core" }
-ps-io = { version = "0.3.0", path = "../ps-io" }
+ps-core = { version = "0.4.0", path = "../ps-core" }
+ps-io = { version = "0.4.0", path = "../ps-io" }
 rayon = "1.12.0"
 rustfft = "6.4.1"

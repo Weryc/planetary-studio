@@ -393,10 +393,17 @@ pub fn module_card(ui: &mut Ui, stage: Stage, enabled: Option<&mut bool>, active
         card(ui, stage_icon(stage), stage.name(), CardStyle::Main, enabled, active, collapsed, status, None, body);
         return CardButtons::default();
     }
-    let mut buttons = CardButtons { auto: true, reset: true };
+    // Colour matching has one way to work: no automatic settings to offer.
+    let mut buttons = CardButtons { auto: stage != Stage::PhotoColor, reset: true };
     let style = if stage == Stage::Smart { CardStyle::Featured } else { CardStyle::Main };
     card(ui, stage_icon(stage), stage.name(), style, enabled, active, collapsed, status, Some(&mut buttons), body);
     buttons
+}
+
+/// A plain collapsible card for a tab's section (no switch, no buttons): the same look as the
+/// module cards. `collapsed`: whether it is folded.
+pub fn section_card(ui: &mut Ui, icon: MaterialIcon, title: &str, collapsed: &mut bool, body: impl FnOnce(&mut Ui)) {
+    card(ui, icon, title, CardStyle::Main, None, false, collapsed, StageStatus::default(), None, body);
 }
 
 /// How a card looks: a module card, the one to reach for first (highlighted, with a badge), or
@@ -1081,13 +1088,9 @@ fn night_choice(ui: &mut Ui, p: &mut SmartParams, nights: &LearnedView) {
                         ui.painter().rect_stroke(response.rect.expand(1.5), CornerRadius::same(theme::radius::S), Stroke::new(2.0, ACCENT), egui::StrokeKind::Outside);
                     }
                     if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        if chosen {
-                            p.night = None;
-                            p.strength = p.learned_strength;
-                        } else if let Some(q) = p.learned_nights.iter().find(|q| q.0 == *night) {
-                            p.night = Some(*night);
-                            p.strength = q.1;
-                        }
+                        // The strength stays as it is: the hypotheses differ in shape only, so
+                        // they compare at the same sharpness and the slider moves all of them.
+                        p.night = if chosen { None } else { Some(*night) };
                     }
                     ui.label(RichText::new(night_name(*night)).size(theme::size::SMALL).color(if chosen { ACCENT } else { TEXT_WEAK }));
                 });
@@ -1116,7 +1119,7 @@ fn learned_why(ui: &mut Ui, p: &SmartParams, analysis: &Analysis) {
     let Some(why) = ps_core::learned::explain(analysis) else { return };
     let cutoff = if p.cutoff > 0.0 { p.cutoff } else { analysis.spectral.map_or(0.2, |s| s.cutoff) };
     let gain = |period: f32| p.target(1.0 / period.max(1.0), cutoff);
-    advanced(ui, "smart-learned-why", tl("Perché questa curva"), true, |ui| {
+    advanced(ui, "smart-learned-why", tl("Perché questa curva"), false, |ui| {
         let line = |ui: &mut Ui, text: String| {
             ui.add(egui::Label::new(RichText::new(format!("• {text}")).size(theme::size::SMALL).color(TEXT_WEAK)).wrap());
         };
@@ -1192,7 +1195,7 @@ fn smart_controls(ui: &mut Ui, p: &mut SmartParams, auto: &SmartParams, analysis
         p.strength = strength / 100.0;
     }
     let mut peak = p.peak * 100.0;
-    if ParamSlider::new(tl("Dove spingere"), &mut peak, 60.0..=140.0, auto.peak * 100.0)
+    if ParamSlider::new(tl("Forma della risposta"), &mut peak, 60.0..=140.0, auto.peak * 100.0)
         .decimals(0)
         .suffix(" %")
         .help(tl("Su quale dimensione di dettaglio cade la spinta massima, rispetto al dettaglio più fine misurato: più alto = più fine (più nitido ma più rumore), più basso = strutture più grandi"))
@@ -1203,6 +1206,7 @@ fn smart_controls(ui: &mut Ui, p: &mut SmartParams, auto: &SmartParams, analysis
     ui.add_space(theme::space::S);
     ui.horizontal(|ui| {
         ui.label(RichText::new(tl("Curva")).size(theme::size::BODY));
+        crate::widgets::help_icon(ui, p.curve.description());
         egui::ComboBox::from_id_salt("smart-curve").width(170.0).selected_text(RichText::new(p.curve.label()).size(theme::size::BODY)).show_ui(ui, |ui| {
             // The learned shape only when the model had an answer for this image.
             let learned = (!p.learned.is_empty()).then_some(SmartCurve::Learned);
@@ -1226,8 +1230,6 @@ fn smart_controls(ui: &mut Ui, p: &mut SmartParams, auto: &SmartParams, analysis
             }
         });
     });
-    // The whole explanation (a hint would show only its first sentence).
-    note(ui, p.curve.description());
     ParamSlider::new(tl("Protezione del bordo"), &mut p.limb_protection, 0.0..=1.0, auto.limb_protection)
         .help(tl("Meno nitidezza dove il soggetto confina con il cielo (bordo del disco, anelli), dentro e subito fuori dal bordo, dove si formano gli aloni. Il resto del disco non cambia"))
         .show(ui);
@@ -1237,8 +1239,10 @@ fn smart_controls(ui: &mut Ui, p: &mut SmartParams, auto: &SmartParams, analysis
 fn smart_rest(ui: &mut Ui, p: &mut SmartParams, view: &mut SmartView, legend: Option<(f32, f32)>, analysis: &Analysis) {
     ui.add_space(theme::space::S);
     let period = if p.cutoff > 0.0 { format!("{:.1} px", 1.0 / p.cutoff) } else { tl("quello misurato sull'immagine").to_string() };
-    hint(ui, &tr!("Aggiunge solo la nitidezza che ancora manca, fino al dettaglio più fine misurato: {period}.", "Adds only the sharpness that is still missing, down to the finest measured detail: {period}."));
-    ui.add_space(theme::space::S);
+    ui.horizontal(|ui| {
+        ui.label(subheading(tl("Curva di risposta")));
+        crate::widgets::help_icon(ui, &tr!("Aggiunge solo la nitidezza che ancora manca, fino al dettaglio più fine misurato: {period}.", "Adds only the sharpness that is still missing, down to the finest measured detail: {period}."));
+    });
     response_graph(ui, p, band_periods(analysis));
     ui.add_space(theme::space::S);
     field_label(ui, tl("Mostra sull'immagine"));
@@ -1388,7 +1392,8 @@ pub struct WaveletView<'a> {
 pub fn wavelet_body(ui: &mut Ui, p: &mut WaveletParams, view: WaveletView) {
     let WaveletView { start, why, cutoff } = view;
     ui.horizontal(|ui| {
-        hint(ui, tl("Nitidezza e rumore per ogni dimensione del dettaglio, dalla più fine"));
+        ui.label(RichText::new(tl("Dal dettaglio più fine")).size(theme::size::SMALL).color(TEXT_WEAK));
+        crate::widgets::help_icon(ui, tl("Nitidezza e rumore per ogni dimensione del dettaglio, dalla più fine"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if icon_button(ui, ICON_RESTART_ALT, tl("Azzera tutti i livelli")).clicked() {
                 p.layers.iter_mut().for_each(|l| *l = WaveletLayer::default());
@@ -1397,20 +1402,22 @@ pub fn wavelet_body(ui: &mut Ui, p: &mut WaveletParams, view: WaveletView) {
         });
     });
     if why.is_some() {
-        field_label(ui, tl("Scale"));
         let mut free = p.scale_mode == ScaleMode::Free;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tl("Scale")).color(TEXT_WEAK));
+            crate::widgets::help_icon(
+                ui,
+                if free {
+                    tl("Il primo livello parte da dove finisce il dettaglio vero dell'immagine, misurato sul suo spettro. Quello che è più fine è solo grana: non viene mai reso più nitido.")
+                } else {
+                    tl("Le scale classiche: ogni livello raddoppia partendo da un passo intero (1 o 2 px). Il primo livello spesso contiene quasi solo rumore e il secondo è già un po' grosso.")
+                },
+            );
+        });
         // The app re-derives the transform (and carries the gains over) when this changes.
         if segmented(ui, &mut free, &[(true, None, tl("Libere")), (false, None, tl("Classiche 1·2·4·8"))]) {
             p.scale_mode = if free { ScaleMode::Free } else { ScaleMode::Dyadic };
         }
-        hint(
-            ui,
-            if free {
-                tl("Il primo livello parte da dove finisce il dettaglio vero dell'immagine, misurato sul suo spettro. Quello che è più fine è solo grana: non viene mai reso più nitido.")
-            } else {
-                tl("Le scale classiche: ogni livello raddoppia partendo da un passo intero (1 o 2 px). Il primo livello spesso contiene quasi solo rumore e il secondo è già un po' grosso.")
-            },
-        );
     }
     ui.add_space(theme::space::XS);
     if p.scale_mode == ScaleMode::Free {
@@ -1447,7 +1454,7 @@ fn grain_row(ui: &mut Ui, below: f32, denoise: &mut f32) {
     egui::Frame::new()
         .fill(BG)
         .corner_radius(CornerRadius::same(theme::radius::L))
-        .inner_margin(egui::Margin::symmetric(10, 8))
+        .inner_margin(egui::Margin::symmetric(10, 5))
         .stroke(Stroke::new(1.0, if active { ACCENT_DIM } else { Color32::TRANSPARENT }))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -1478,10 +1485,11 @@ fn layer_row(ui: &mut Ui, j: usize, scale: f32, period: f32, layer: &mut Wavelet
         egui::Frame::new()
             .fill(BG)
             .corner_radius(CornerRadius::same(theme::radius::L))
-            .inner_margin(egui::Margin::symmetric(10, 8))
+            .inner_margin(egui::Margin::symmetric(10, 5))
             .stroke(Stroke::new(1.0, if active { ACCENT_DIM } else { Color32::TRANSPARENT }))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 2.0;
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
                     ui.painter().circle_filled(rect.center(), 10.0, if active { ACCENT } else { SURFACE_HOVER });
@@ -1492,7 +1500,7 @@ fn layer_row(ui: &mut Ui, j: usize, scale: f32, period: f32, layer: &mut Wavelet
                         if (active || layer.mult != 1.0) && icon_button(ui, ICON_RESTART_ALT, tl("Azzera livello")).clicked() {
                             *layer = WaveletLayer::default();
                         }
-                        ui.add(egui::DragValue::new(&mut layer.mult).range(1.0..=5.0).speed(0.02).max_decimals(1).prefix("×"))
+                        crate::widgets::stepper(ui, &mut layer.mult, 1.0..=2.5, 0.1, "×")
                             .on_hover_text(tl("Moltiplicatore di questo livello: moltiplica la sua nitidezza quando il cursore a fondo scala non basta"));
                         ui.label(RichText::new(tr!("dettagli ≈{} px", "details ≈{} px", scale_label(period))).size(theme::size::SMALL).color(TEXT_WEAK))
                             .on_hover_text(tr!("Agisce soprattutto sui dettagli con un periodo di circa {} px (scala del livello {} px)", "Acts mainly on details with a period of about {} px (level scale {} px)", scale_label(period), scale_label(scale)));
@@ -1733,7 +1741,7 @@ const LAYER_SECTIONS: [(&str, &str); 6] = [("smart", "Nitidezza"), ("wavelet", "
 /// Icon and full title of a mask's adjustment.
 fn section_title(key: &str) -> (MaterialIcon, &'static str) {
     match key {
-        "smart" => (stage_icon(Stage::Smart), tl("Nitidezza finale")),
+        "smart" => (stage_icon(Stage::Smart), tl("Nitidezza intelligente")),
         "wavelet" => (ICON_WAVES, "Wavelet"),
         "contrast" => (ICON_CONTRAST, tl("Contrasto")),
         "noise" => (ICON_GRAIN, tl("Rumore")),
@@ -1912,6 +1920,7 @@ fn mask_row(ui: &mut Ui, index: usize, layer: &mut Layer, state: &mut LayerUi, d
                         let own: Vec<&str> = sections(state.mono).into_iter().filter(|(k, _)| *own_settings(layer, k)).map(|(_, name)| name).collect();
                         let (text, colour) = match mask_problem(layer, state.thumbs) {
                             Some(problem) if layer.enabled => (format!("⚠ {problem}"), WARNING),
+                            _ if own.is_empty() && layer.additive => (tl("Nessuna regolazione").to_string(), TEXT_WEAK),
                             _ if own.is_empty() => (tl("Come l'immagine intera").to_string(), TEXT_WEAK),
                             _ => (own.join(" · "), TEXT_WEAK),
                         };
@@ -2055,6 +2064,18 @@ fn layer_editor(ui: &mut Ui, layer: &mut Layer, state: &mut LayerUi, actions: &m
             });
         });
         ui.add_space(theme::space::S);
+        if layer.additive {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tl("Fusione")).color(TEXT_WEAK));
+                crate::widgets::help_icon(ui, layer.blend.description());
+                egui::ComboBox::from_id_salt(("blend", id)).width(150.0).selected_text(layer.blend.label()).show_ui(ui, |ui| {
+                    for mode in ps_core::blend::BlendMode::ALL {
+                        ui.selectable_value(&mut layer.blend, mode, mode.label()).on_hover_text(mode.description());
+                    }
+                });
+            });
+            ui.add_space(theme::space::S);
+        }
 
         section_heading(ui, tl("ZONA"), layer.mask.shape.label());
         ui.add_space(theme::space::XS);
@@ -2067,6 +2088,7 @@ fn layer_editor(ui: &mut Ui, layer: &mut Layer, state: &mut LayerUi, actions: &m
         let inserted: Vec<&str> = sections.iter().map(|(k, _)| *k).filter(|k| *own_settings(layer, k)).collect();
         ui.horizontal(|ui| {
             section_heading(ui, tl("REGOLAZIONI"), &match inserted.len() {
+                0 if layer.additive => tl("nessuna").to_string(),
                 0 => tl("come l'immagine").to_string(),
                 n => tr!("{n} inserit{}", "{n} inserted{}", if ps_core::i18n::is_en() { "" } else if n == 1 { "a" } else { "e" }),
             });
@@ -2125,11 +2147,13 @@ fn adjustment<'k>(
                 ui.set_width(ui.available_width());
                 let mine = *own_settings(layer, key);
                 let chevron = if is_open { ICON_KEYBOARD_ARROW_DOWN } else { ICON_KEYBOARD_ARROW_RIGHT };
-                ui.label(chevron.rich_text().color(TEXT_WEAK));
-                ui.label(icon.rich_text().size(theme::size::BODY + 3.0).color(if mine { ACCENT } else { TEXT_WEAK }));
+                // Not selectable: a text label would take the click that opens the adjustment.
+                ui.add(egui::Label::new(chevron.rich_text().color(TEXT_WEAK)).selectable(false));
+                ui.add(egui::Label::new(icon.rich_text().size(theme::size::BODY + 3.0).color(if mine { ACCENT } else { TEXT_WEAK })).selectable(false));
                 ui.add(egui::Label::new(RichText::new(title).color(if mine { TEXT } else { TEXT_WEAK })).selectable(false));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, ICON_CLOSE, tl("Togli questa regolazione dalla maschera (torna a quella dell'immagine)")).clicked() {
+                    let tip = if layer.additive { tl("Togli questa regolazione dalla maschera") } else { tl("Togli questa regolazione dalla maschera (torna a quella dell'immagine)") };
+                    if icon_button(ui, ICON_CLOSE, tip).clicked() {
                         *own_settings(layer, key) = false;
                         if *open == Some(key) {
                             *open = None;
@@ -2151,7 +2175,7 @@ fn adjustment<'k>(
         match key {
             "smart" => {
                 smart_controls(ui, &mut layer.smart.params, smart_start, None);
-                hint(ui, tl("Agisce su questa zona dopo le altre regolazioni di nitidezza, come la Nitidezza finale dell'immagine intera."));
+                hint(ui, tl("Agisce su questa zona dopo le altre regolazioni di nitidezza, come la Nitidezza intelligente dell'immagine intera."));
             }
             "wavelet" => wavelet_body(ui, &mut layer.wavelet.params, WaveletView { start: wavelet_start, why: None, cutoff: None }),
             "contrast" => contrast_body(ui, &mut layer.contrast.params),

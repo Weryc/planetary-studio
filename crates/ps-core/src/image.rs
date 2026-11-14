@@ -74,15 +74,16 @@ impl Image {
         let n = self.width * self.height;
         let c = self.channels.len();
         let mut out = vec![0u16; n * c];
-        for (ci, plane) in self.channels.iter().enumerate() {
-            for (i, &v) in plane.iter().enumerate() {
-                out[i * c + ci] = (v.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+        out.par_chunks_mut(c).enumerate().for_each(|(i, px)| {
+            for (o, plane) in px.iter_mut().zip(&self.channels) {
+                *o = (plane[i].clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
             }
-        }
+        });
         out
     }
 
-    fn rgb_planes(&self) -> (&[f32], &[f32], &[f32]) {
+    /// The three colour planes (the one grey plane thrice for a mono image).
+    pub fn rgb_planes(&self) -> (&[f32], &[f32], &[f32]) {
         match self.channels.as_slice() {
             [m] => (m, m, m),
             [r, g, b] => (r, g, b),
@@ -108,6 +109,18 @@ pub fn downscale_plane(plane: &[f32], w: usize, h: usize, f: usize) -> Vec<f32> 
         }
     });
     out
+}
+
+/// Bilinear sample of a `w`×`h` plane at (x, y), pixel centres at +0.5, edges clamped.
+pub fn bilinear_clamped(plane: &[f32], w: usize, h: usize, x: f32, y: f32) -> f32 {
+    let (x, y) = ((x - 0.5).clamp(0.0, (w - 1) as f32), (y - 0.5).clamp(0.0, (h - 1) as f32));
+    let (x0, y0) = (x as usize, y as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (tx, ty) = (x - x0 as f32, y - y0 as f32);
+    let at = |x: usize, y: usize| plane[y * w + x];
+    let top = at(x0, y0) + tx * (at(x1, y0) - at(x0, y0));
+    let bottom = at(x0, y1) + tx * (at(x1, y1) - at(x0, y1));
+    top + ty * (bottom - top)
 }
 
 #[cfg(test)]

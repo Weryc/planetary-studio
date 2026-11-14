@@ -52,17 +52,11 @@ struct Fitting {
     rx: Receiver<Option<ps_core::identify::TimeFit>>,
 }
 
-/// The two halves of the tab: finding the object and its orientation, and writing on the image.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Sub {
-    #[default]
-    Identify,
-    Annotate,
-}
-
 pub struct IdentifyState {
-    /// Which half of the tab is showing.
-    pub sub: Sub,
+    /// The tab's two sections, folded or not: finding the object and its orientation, and
+    /// writing on the image.
+    pub identify_collapsed: bool,
+    pub annotate_collapsed: bool,
     /// The names and caption are written on the image (a layer among the masks).
     pub annotate: bool,
     /// The top-bar button: identify the subject and show the names on the image.
@@ -115,7 +109,7 @@ pub struct IdentifyState {
 
 impl Default for IdentifyState {
     fn default() -> Self {
-        Self { sub: Sub::Identify, annotate: false, active: false, open: false, show_labels: true, utc: true, zone_auto: true, offset_min: 0, zone_cache: None, zone_pending: None, fitted_path: None, fit_applied: false, fit_requested: false, fit_orientation: true, fit_upright: false, upright_pending: None, body: None, time: None, manual: None, picks: [PlacePick::default(); 2], placed: None, place_error: None, awaiting: None, place_mirror: false, result: None, pending: None, fitting: None, fit_note: None, image_path: None }
+        Self { identify_collapsed: false, annotate_collapsed: true, annotate: false, active: false, open: false, show_labels: true, utc: true, zone_auto: true, offset_min: 0, zone_cache: None, zone_pending: None, fitted_path: None, fit_applied: false, fit_requested: false, fit_orientation: true, fit_upright: false, upright_pending: None, body: None, time: None, manual: None, picks: [PlacePick::default(); 2], placed: None, place_error: None, awaiting: None, place_mirror: false, result: None, pending: None, fitting: None, fit_note: None, image_path: None }
     }
 }
 
@@ -705,11 +699,13 @@ impl IdentifyState {
 
     /// The tab's content.
     pub fn tab(&mut self, ui: &mut Ui, input: &IdentifyInput, opt: &mut LabelOptions, actions: &mut Vec<PanelAction>) {
-        ui.scope(|ui| segmented(ui, &mut self.sub, &[(Sub::Identify, Some(ICON_TRAVEL_EXPLORE), tl("Identificazione")), (Sub::Annotate, Some(ICON_EDIT_NOTE), tl("Annotazione"))]));
-        match self.sub {
-            Sub::Identify => self.identify_part(ui, input, actions),
-            Sub::Annotate => self.annotate_part(ui, opt),
-        }
+        // Two cards like the other tabs'.
+        let mut folded = self.identify_collapsed;
+        crate::panels::section_card(ui, ICON_TRAVEL_EXPLORE, tl("Identificazione"), &mut folded, |ui| self.identify_part(ui, input, actions));
+        self.identify_collapsed = folded;
+        let mut folded = self.annotate_collapsed;
+        crate::panels::section_card(ui, ICON_EDIT_NOTE, tl("Annotazione"), &mut folded, |ui| self.annotate_part(ui, opt));
+        self.annotate_collapsed = folded;
     }
 
     /// Object, date, orientation: what puts the moons and craters on their places.

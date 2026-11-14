@@ -159,7 +159,7 @@ impl Default for SmartParams {
 /// Peak gain at strength 1: BlurXTerminator's typical peak on real stacks (median ×10–12).
 const PEAK_AT_FULL: f32 = 12.0;
 /// The strength can go past BlurXTerminator's typical result.
-pub const MAX_STRENGTH: f32 = 1.9;
+pub const MAX_STRENGTH: f32 = 2.0;
 
 impl SmartParams {
     /// The shape table in use: the learned one when chosen and present.

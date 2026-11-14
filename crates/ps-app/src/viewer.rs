@@ -759,6 +759,11 @@ fn crop_bar(ui: &mut egui::Ui, canvas: Rect, straighten: &mut f32) -> Option<Cro
             ui.label(ICON_STRAIGHTEN.rich_text().size(theme::size::ICON)).on_hover_text(tl("Raddrizza"));
             ui.spacing_mut().slider_width = 130.0;
             let slider = ui.add(egui::Slider::new(straighten, -45.0..=45.0).fixed_decimals(1).suffix("°"));
+            // Double click: back to straight (the slider itself only senses drags).
+            if slider.hovered() && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+                *straighten = 0.0;
+                action = Some(CropAction::Straighten(0.0));
+            }
             if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                 action = Some(CropAction::Straighten(*straighten));
             }

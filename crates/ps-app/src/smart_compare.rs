@@ -70,17 +70,16 @@ impl SmartCompare {
     }
 }
 
-/// What the thumbnails depend on: the image and every setting but the chosen night and the
-/// strength (each hypothesis brings its own).
+/// What the thumbnails depend on: the image and every setting but the chosen night.
 fn key_of(source_gen: u64, p: &SmartParams) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     source_gen.hash(&mut h);
-    for v in [p.cutoff, p.peak, p.limb_protection, p.limb_width] {
+    for v in [p.cutoff, p.peak, p.limb_protection, p.limb_width, p.strength] {
         v.to_bits().hash(&mut h);
     }
     (p.adaptive, p.include_sky, p.protect_highlights, p.color as u8).hash(&mut h);
-    for (n, s, t) in &p.learned_nights {
-        (*n as u8, s.to_bits()).hash(&mut h);
+    for (n, _, t) in &p.learned_nights {
+        (*n as u8).hash(&mut h);
         t.iter().for_each(|q| (q.0.to_bits(), q.1.to_bits()).hash(&mut h));
     }
     h.finish().max(1)
@@ -100,8 +99,9 @@ pub(crate) fn make(source: &Image, p: &SmartParams, (cx, cy): (usize, usize)) ->
     let subject = (!p.include_sky).then(|| ps_core::mask::subject_and_moons(&crop));
     p.learned_nights
         .iter()
-        .map(|(n, strength, _)| {
-            let params = SmartParams { night: Some(*n), strength: *strength, ..p.clone() };
+        .map(|(n, _, _)| {
+            // Every hypothesis at the strength in use: only the shape differs.
+            let params = SmartParams { night: Some(*n), ..p.clone() };
             let out = ps_core::smart::sharpen(&crop, None, &params, subject.as_deref());
             (*n, crate::worker::display_image(&out, side))
         })

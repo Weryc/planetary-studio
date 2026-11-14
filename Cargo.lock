@@ -3040,7 +3040,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "ps-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "eframe",
  "egui_kittest",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "ps-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytemuck",
  "pollster 0.4.0",
@@ -3072,7 +3072,7 @@ dependencies = [
 
 [[package]]
 name = "ps-io"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "image",
  "ps-core",
@@ -3083,7 +3083,7 @@ dependencies = [
 
 [[package]]
 name = "ps-train"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "candle-core",
  "candle-nn",
