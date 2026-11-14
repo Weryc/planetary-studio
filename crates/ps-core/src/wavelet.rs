@@ -30,10 +30,7 @@ fn gaussian_pass(sigma: f32) -> (Vec<f32>, usize) {
         let a = 0.5 * s * s;
         return (vec![a, 1.0 - 2.0 * a, a], step);
     }
-    let r = (3.0 * s).ceil() as i32;
-    let taps: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f32 / (2.0 * s * s)).exp()).collect();
-    let sum: f32 = taps.iter().sum();
-    (taps.into_iter().map(|t| t / sum).collect(), step)
+    (crate::blur::gaussian_taps(s), step)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -55,10 +52,7 @@ impl WaveletKernel {
             WaveletKernel::Linear => vec![0.25, 0.5, 0.25],
             WaveletKernel::Gaussian { sigma } => {
                 let s = sigma.clamp(0.3, 4.0);
-                let r = (3.0 * s).ceil() as i32;
-                let taps: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f32 / (2.0 * s * s)).exp()).collect();
-                let sum: f32 = taps.iter().sum();
-                taps.into_iter().map(|t| t / sum).collect()
+                crate::blur::gaussian_taps(s)
             }
         }
     }
@@ -722,7 +716,7 @@ fn noise_factors(params: &WaveletParams) -> Vec<f32> {
     static CACHE: OnceLock<Mutex<HashMap<String, Vec<f32>>>> = OnceLock::new();
     let key = format!("{:?}", params.decomposition_key());
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(f) = cache.lock().unwrap().get(&key) {
+    if let Some(f) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
         return f.clone();
     }
 
@@ -739,7 +733,7 @@ fn noise_factors(params: &WaveletParams) -> Vec<f32> {
         factors.push(var.sqrt().max(1e-6) as f32);
         std::mem::swap(&mut current, &mut next);
     }
-    cache.lock().unwrap().insert(key, factors.clone());
+    cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, factors.clone());
     factors
 }
 

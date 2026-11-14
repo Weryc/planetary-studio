@@ -25,14 +25,21 @@ Scarica l'ultima versione dalla **[pagina delle Release](../../releases/latest)*
 - **macOS** — clic destro sull'app → *Apri* → *Apri*. Sulle versioni recenti: *Impostazioni di Sistema → Privacy e sicurezza → Apri comunque*.
 - **Windows** — nella finestra di SmartScreen fai clic su *Ulteriori informazioni* → *Esegui comunque*.
 
+## Novità della 0.4.0
+
+- **Riduzione del rumore appresa** — una piccola rete neurale (una U-Net di circa 146 mila pesi, addestrata su stack simulati di immagini nitide di Hubble, Cassini, SDO e NASA con rumore realistico: rumore fotonico, grana correlata, piedistallo del cielo) toglie il rumore dopo la deconvoluzione e prima delle wavelet. Sulle immagini tenute da parte l'errore è circa la metà di quello dei metodi classici. Gira sulla CPU, non scarica nulla ed è la scelta automatica per ogni soggetto; i vecchi metodi restano disponibili.
+- **Le maschere funzionano come livelli di regolazione** — una maschera dipinta parte ora da zero e applica solo ciò che accendi (wavelet, rumore, contrasto, nitidezza intelligente, toni, colore) sopra il risultato ottenuto fin lì. Ogni maschera ha una **modalità di fusione** (Normale, Scurisci, Moltiplica, Colore brucia, Schiarisci, Scherma, Scherma colore, Sovrapponi, Luce soffusa, Luce intensa, Differenza, Colore, Luminosità), come in un editor di immagini. I file salvati con le vecchie maschere si aprono come prima.
+- **Nitidezza intelligente** — la nitidezza appresa cambia nome (prima *Nitidezza finale*) e ha un controllo per la forma della curva di risposta.
+- **Interfaccia più ordinata** — la scheda Identifica è ora fatta di due schede richiudibili e alcuni pannelli sono stati riorganizzati.
+
 ## Funzioni
 
 - **Riconoscimento automatico** del soggetto (pianeta, Saturno, disco intero, superficie lunare), con impostazioni strutturali e la spiegazione di ogni scelta automatica.
 - **Deconvoluzione** — Richardson–Lucy (accelerata, con regolarizzazione TV e smorzamento) e Wiener; PSF misurata dall'immagine, disegnando un riquadro o cliccando una stella; anti-ringing integrato.
 - **Wavelet** — starlet isotropa (*à trous*) con scale libere posizionate in base allo spettro dell'immagine, oppure scale classiche 1-2-4-8; guadagni adattivi al rumore e protezione dei bordi.
-- **Nitidezza finale appresa** — un piccolo modello sceglie quanto rinforzare ogni dimensione di dettaglio, dalle bande di Giove fino al dettaglio più fine lasciato dal seeing; i pixel li calcolano sempre le wavelet classiche, niente viene inventato. È stato addestrato su immagini nitide di Hubble, Cassini, SDO e NASA viste attraverso un seeing simulato come in uno stack vero (centinaia di fotogrammi con turbolenza, i migliori allineati e sommati). Quando dall'immagine non si capisce quanto era turbolenta la serata, mostra il risultato con seeing calmo, medio e turbolento uno accanto all'altro, e spiega la sua scelta: le bande misurate, dove finisce il dettaglio, cosa ha pesato di più.
-- **Riduzione del rumore** per tipo di soggetto, **dering** a pennello: dipingi sopra l'anello scuro (dentro il bordo, nel cielo attorno, accanto a un cratere) e viene misurato e schiarito fino a ciò che ha accanto, senza toccare bordi e bande, **curve e livelli** (anche per canale), **colore**, allineamento RGB, Mineral Moon.
-- **Maschere** — elabora a parte gli anelli di Saturno, il globo, le lune o una zona dipinta. Un elenco chiaro mostra di ogni maschera la miniatura, cosa cambia e l'ordine (si riordina trascinando).
+- **Nitidezza intelligente appresa** — un piccolo modello sceglie quanto rinforzare ogni dimensione di dettaglio, dalle bande di Giove fino al dettaglio più fine lasciato dal seeing; i pixel li calcolano sempre le wavelet classiche, niente viene inventato. È stato addestrato su immagini nitide di Hubble, Cassini, SDO e NASA viste attraverso un seeing simulato come in uno stack vero (centinaia di fotogrammi con turbolenza, i migliori allineati e sommati). Quando dall'immagine non si capisce quanto era turbolenta la serata, mostra il risultato con seeing calmo, medio e turbolento uno accanto all'altro, e spiega la sua scelta: le bande misurate, dove finisce il dettaglio, cosa ha pesato di più.
+- **Riduzione del rumore** appresa (rete neurale) o con metodi classici scelti per tipo di soggetto, **dering** a pennello: dipingi sopra l'anello scuro (dentro il bordo, nel cielo attorno, accanto a un cratere) e viene misurato e schiarito fino a ciò che ha accanto, senza toccare bordi e bande, **curve e livelli** (anche per canale), **colore**, allineamento RGB, Mineral Moon.
+- **Maschere** — elabora a parte gli anelli di Saturno, il globo, le lune o una zona dipinta, sovrapposte all'immagine con una modalità di fusione. Un elenco chiaro mostra di ogni maschera la miniatura, cosa cambia e l'ordine (si riordina trascinando).
 - **Confronto A/B**, vista prima/dopo divisa, anteprima su ROI.
 - **Strumentazione e diagnosi** — catalogo telescopi/camere, lettura dei log di FireCapture/SharpCap/AutoStakkert!, scala dell'immagine dalle effemeridi, grafico dello spettro.
 - **Identifica e annota** — nomi delle lune di Giove e Saturno, crateri e mari lunari, orientamento del Sole, dall'ora della ripresa; esportazione con i nomi sull'immagine.
@@ -57,9 +64,9 @@ Tutte le immagini sono riprese dell'autore, elaborate nell'app.
 
 ### La nitidezza appresa, spiegata
 
-<img src="docs/screenshots/learned-sharpening-it.png" width="360" align="right" alt="La scheda Nitidezza finale: tre ipotesi sul seeing e perché la curva è fatta così">
+<img src="docs/screenshots/learned-sharpening-it.png" width="360" align="right" alt="La scheda Nitidezza intelligente: tre ipotesi sul seeing e perché la curva è fatta così">
 
-La scheda Nitidezza finale con la curva appresa su Giove:
+La scheda Nitidezza intelligente con la curva appresa su Giove:
 
 - **Tre ipotesi sul seeing** — il soggetto con seeing calmo, medio e turbolento; un clic sceglie quella che sembra giusta.
 - **Perché questa curva** — cosa ha misurato (dettaglio più fine, bande scure e zone chiare con la loro larghezza, soggetto, segnale sul rumore) e cosa ha spinto la curva in su o in giù.

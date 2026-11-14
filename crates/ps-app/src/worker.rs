@@ -174,7 +174,7 @@ impl Worker {
     }
 
     pub fn progress(&self) -> Option<Progress> {
-        *self.progress.lock().unwrap()
+        *self.progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// True while the full image is being rendered in the background.
@@ -327,11 +327,11 @@ impl WorkerThread {
             let progress = Arc::clone(&self.progress);
             let ctx = self.ctx.clone();
             let report = move |stage: Stage, fraction: f32| {
-                *progress.lock().unwrap() = Some(Progress { stage, fraction });
+                *progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Progress { stage, fraction });
                 ctx.request_repaint();
             };
             let output = self.render(processor, req, input, &cancel, &report, false);
-            *self.progress.lock().unwrap() = None;
+            *self.progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             self.completed.store(id, Ordering::SeqCst);
 
             // `None` = cancelled: a newer request is already queued.
@@ -566,71 +566,63 @@ fn display_factor(w: usize, h: usize, max_side: usize) -> usize {
 /// Convert to an egui texture image, box-downsampling if it exceeds the GPU texture limit.
 pub fn display_image(image: &Image, max_side: usize) -> ColorImage {
     let (w, h) = (image.width(), image.height());
-    let rgba = image.to_rgba8();
     let factor = display_factor(w, h, max_side);
     if factor == 1 {
-        return ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+        return ColorImage::from_rgba_unmultiplied([w, h], &image.to_rgba8());
     }
-    let (dw, dh) = (w / factor, h / factor);
-    let mut out = vec![0u8; dw * dh * 4];
-    out.par_chunks_mut(dw * 4).enumerate().for_each(|(y, row)| {
-        for x in 0..dw {
-            let mut acc = [0u32; 4];
-            for sy in 0..factor {
-                for sx in 0..factor {
-                    let s = ((y * factor + sy) * w + x * factor + sx) * 4;
-                    for c in 0..4 {
-                        acc[c] += rgba[s + c] as u32;
-                    }
-                }
-            }
-            for c in 0..4 {
-                row[x * 4 + c] = (acc[c] / (factor * factor) as u32) as u8;
+    // Averaged straight from the planes: no full-size RGBA copy first.
+    let (r, g, b) = image.rgb_planes();
+    let norm = 1.0 / (factor * factor) as f32;
+    let quant = |v: f32| (v * norm * 255.0 + 0.5) as u8;
+    reduced(w, h, max_side, |x0, y0, f| {
+        let mut acc = [0.0f32; 3];
+        for dy in 0..f {
+            let row = (y0 + dy) * w + x0;
+            for dx in 0..f {
+                acc[0] += r[row + dx].clamp(0.0, 1.0);
+                acc[1] += g[row + dx].clamp(0.0, 1.0);
+                acc[2] += b[row + dx].clamp(0.0, 1.0);
             }
         }
-    });
-    ColorImage::from_rgba_unmultiplied([dw, dh], &out)
+        Color32::from_rgb(quant(acc[0]), quant(acc[1]), quant(acc[2]))
+    })
+}
+
+/// An overlay for a `w`×`h` image, reduced to fit the texture limit: `pixel(x, y, f)` gives the
+/// colour of the `f`×`f` block whose top-left corner is (x, y) (`f` is 1 when no reduction is needed).
+fn reduced(w: usize, h: usize, max_side: usize, pixel: impl Fn(usize, usize, usize) -> Color32 + Sync) -> ColorImage {
+    let f = display_factor(w, h, max_side);
+    let (dw, dh) = (w / f, h / f);
+    let pixels = (0..dw * dh).into_par_iter().map(|i| pixel((i % dw) * f, (i / dw) * f, f)).collect();
+    ColorImage::new([dw, dh], pixels)
 }
 
 /// `colour` over the pixels where `plane` rises from `lo` to `hi` (transparent elsewhere).
 fn heat_overlay(plane: &[f32], w: usize, h: usize, max_side: usize, colour: [u8; 3], lo: f32, hi: f32) -> ColorImage {
-    let f = display_factor(w, h, max_side);
-    let (dw, dh) = (w / f, h / f);
-    let pixels = (0..dw * dh)
-        .into_par_iter()
-        .map(|i| {
-            let (x0, y0) = ((i % dw) * f, (i / dw) * f);
-            // The strongest value in the block, so thin rings stay visible when reduced.
-            let v = (0..f).flat_map(|dy| (0..f).map(move |dx| plane[(y0 + dy) * w + x0 + dx])).fold(0.0f32, f32::max);
-            let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
-            Color32::from_rgba_unmultiplied(colour[0], colour[1], colour[2], (t * 200.0) as u8)
-        })
-        .collect();
-    ColorImage::new([dw, dh], pixels)
+    reduced(w, h, max_side, |x0, y0, f| {
+        // The strongest value in the block, so thin rings stay visible when reduced.
+        let v = (0..f).flat_map(|dy| (0..f).map(move |dx| plane[(y0 + dy) * w + x0 + dx])).fold(0.0f32, f32::max);
+        let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+        Color32::from_rgba_unmultiplied(colour[0], colour[1], colour[2], (t * 200.0) as u8)
+    })
 }
 
 /// Where the smart sharpening holds back: "Segui le zone" (blue), the limb protection
 /// (orange), the sky it leaves out (grey); the strongest at each pixel.
 fn hold_back_overlay(zones: &[f32], edges: &[f32], excluded: Option<&[f32]>, w: usize, h: usize, max_side: usize) -> ColorImage {
-    let f = display_factor(w, h, max_side);
-    let (dw, dh) = (w / f, h / f);
-    let pixels = (0..dw * dh)
-        .into_par_iter()
-        .map(|i| {
-            let k = (i / dw) * f * w + (i % dw) * f;
-            let sky = excluded.map_or(0.0, |e| e[k].clamp(0.0, 1.0));
-            let (z, e) = (zones[k].clamp(0.0, 1.0) * (1.0 - sky), edges[k].clamp(0.0, 1.0) * (1.0 - sky));
-            let (c, a) = if sky >= z.max(e) {
-                (crate::panels::SKY_COLOUR, sky)
-            } else if e >= z {
-                (crate::panels::EDGE_COLOUR, e)
-            } else {
-                (crate::panels::ZONES_COLOUR, z)
-            };
-            Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (a * 150.0) as u8)
-        })
-        .collect();
-    ColorImage::new([dw, dh], pixels)
+    reduced(w, h, max_side, |x, y, _| {
+        let k = y * w + x;
+        let sky = excluded.map_or(0.0, |e| e[k].clamp(0.0, 1.0));
+        let (z, e) = (zones[k].clamp(0.0, 1.0) * (1.0 - sky), edges[k].clamp(0.0, 1.0) * (1.0 - sky));
+        let (c, a) = if sky >= z.max(e) {
+            (crate::panels::SKY_COLOUR, sky)
+        } else if e >= z {
+            (crate::panels::EDGE_COLOUR, e)
+        } else {
+            (crate::panels::ZONES_COLOUR, z)
+        };
+        Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (a * 150.0) as u8)
+    })
 }
 
 /// The periods (px) the resolution colours span: most of the subject's, at least a factor 1.6
@@ -650,21 +642,15 @@ fn resolution_range(periods: &[f32]) -> (f32, f32) {
 /// The finest detail present, coloured over `range`; nothing off the subject, dark grey where
 /// it holds no detail.
 fn resolution_overlay(periods: &[f32], w: usize, h: usize, max_side: usize, range: (f32, f32)) -> ColorImage {
-    let f = display_factor(w, h, max_side);
-    let (dw, dh) = (w / f, h / f);
-    let pixels = (0..dw * dh)
-        .into_par_iter()
-        .map(|i| {
-            let p = periods[(i / dw) * f * w + (i % dw) * f];
-            if p < 0.0 {
-                Color32::TRANSPARENT
-            } else {
-                let c = crate::panels::resolution_colour(p, range).unwrap_or(Color32::from_rgb(40, 40, 46));
-                Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 200)
-            }
-        })
-        .collect();
-    ColorImage::new([dw, dh], pixels)
+    reduced(w, h, max_side, |x, y, _| {
+        let p = periods[y * w + x];
+        if p < 0.0 {
+            Color32::TRANSPARENT
+        } else {
+            let c = crate::panels::resolution_colour(p, range).unwrap_or(Color32::from_rgb(40, 40, 46));
+            Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 200)
+        }
+    })
 }
 
 /// Pixels burnt to white (red) and detail crushed to black where the unprocessed image had
@@ -693,21 +679,15 @@ fn clip_overlay(image: &Image, before: &Image, max_side: usize) -> (ColorImage, 
         })
         .collect();
     let count = state.par_iter().filter(|s| **s != 0).count();
-    let f = display_factor(w, h, max_side);
-    let (dw, dh) = (w / f, h / f);
-    let pixels = (0..dw * dh)
-        .into_par_iter()
-        .map(|i| {
-            let (x0, y0) = ((i % dw) * f, (i / dw) * f);
-            let worst = (0..f).flat_map(|dy| (0..f).map(move |dx| (y0 + dy) * w + x0 + dx)).map(|j| state[j]).max().unwrap_or(0);
-            match worst {
-                1 => Color32::from_rgba_unmultiplied(255, 40, 40, 230),
-                2 => Color32::from_rgba_unmultiplied(40, 120, 255, 230),
-                _ => Color32::TRANSPARENT,
-            }
-        })
-        .collect();
-    (ColorImage::new([dw, dh], pixels), count)
+    let overlay = reduced(w, h, max_side, |x0, y0, f| {
+        let worst = (0..f).flat_map(|dy| (0..f).map(move |dx| (y0 + dy) * w + x0 + dx)).map(|j| state[j]).max().unwrap_or(0);
+        match worst {
+            1 => Color32::from_rgba_unmultiplied(255, 40, 40, 230),
+            2 => Color32::from_rgba_unmultiplied(40, 120, 255, 230),
+            _ => Color32::TRANSPARENT,
+        }
+    });
+    (overlay, count)
 }
 
 /// A mask shrunk to [`THUMB_SIDE`], white where it applies, and whether it selects (almost)
@@ -751,16 +731,10 @@ fn mask_thumb(plane: &[f32], w: usize, h: usize) -> (Arc<ColorImage>, bool) {
 
 /// Semi-transparent tint showing where a mask applies.
 fn mask_overlay(plane: &[f32], w: usize, h: usize, max_side: usize) -> ColorImage {
-    let f = display_factor(w, h, max_side);
-    let (dw, dh) = (w / f, h / f);
-    let pixels = (0..dw * dh)
-        .map(|i| {
-            let (x, y) = ((i % dw) * f, (i / dw) * f);
-            let m = plane[y * w + x].clamp(0.0, 1.0);
-            Color32::from_rgba_unmultiplied(255, 70, 50, (m * 120.0) as u8)
-        })
-        .collect();
-    ColorImage::new([dw, dh], pixels)
+    reduced(w, h, max_side, |x, y, _| {
+        let m = plane[y * w + x].clamp(0.0, 1.0);
+        Color32::from_rgba_unmultiplied(255, 70, 50, (m * 120.0) as u8)
+    })
 }
 
 #[cfg(test)]

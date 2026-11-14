@@ -302,7 +302,7 @@ pub fn smart_structure(kind: ImageKind, analysis: &Analysis) -> crate::smart::Sm
     // The shape the learned model picks for this image, when it has an answer.
     use crate::smart::SmartCurve;
     let (learned_strength, learned) = crate::learned::smart_curve(analysis).unwrap_or_default();
-    let curve = if crate::learned::IN_USE && !learned.is_empty() { SmartCurve::Learned } else { SmartCurve::Standard };
+    let curve = if !learned.is_empty() { SmartCurve::Learned } else { SmartCurve::Standard };
     let color = if curve == SmartCurve::Learned { learned_colour(analysis) } else { crate::color::ColorMode::Luminance };
     let learned_nights = crate::learned::nights(analysis);
     crate::smart::SmartParams { cutoff: detail_cutoff(analysis).unwrap_or(0.0), peak, limb_protection, limb_width, include_sky, curve, learned, learned_strength, learned_nights, color, ..Default::default() }
@@ -473,7 +473,8 @@ fn nothing_applied(p: Pipeline) -> Pipeline {
         tone: Module::on(ToneParams::default()),
         curves: Module::on(ToneParams::default()),
         color: Module::on(ColorParams::default()),
-        photocolor: Module::off(crate::photocolor::PhotoColorParams::neutral()),
+        // Off, but ready: switching it on gives Hubble 2021 at full intensity.
+        photocolor: Module::off(crate::photocolor::PhotoColorParams::default()),
         mineral: Module::on(crate::adjust::MineralParams::neutral()),
         suncolor: Module::on(crate::suncolor::SunColorParams::neutral()),
         layers: p.layers,
@@ -500,8 +501,12 @@ pub fn add_role_layer(p: &mut Pipeline, role: LayerRole) -> u64 {
     };
     let id = p.add_layer(name, MaskSpec::new(MaskShape::Auto(region), feather));
     let base_wavelet = p.wavelet.params.clone();
+    let (denoise, contrast, smart, tone, color) = (p.denoise.params.clone(), p.contrast.params.clone(), p.smart.params.clone(), p.tone.params.clone(), p.color.params.clone());
     let layer = p.layer_mut(id).expect("just added");
     layer.role = Some(role);
+    // These masks redo the finishing with their own settings, built from the whole image's.
+    layer.additive = false;
+    (layer.denoise.params, layer.contrast.params, layer.smart.params, layer.tone.params, layer.color.params) = (denoise, contrast, smart, tone, color);
     let mut wavelet = base_wavelet;
     let gains: &[f32] = match role {
         // Ring divisions and ringlets sit at 2–4 px: favour those scales.

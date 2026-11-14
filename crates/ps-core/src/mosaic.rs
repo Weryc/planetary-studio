@@ -583,16 +583,9 @@ pub fn sharpness(img: &Image) -> f32 {
 /// Bilinear sample of every channel at (x, y) (pixel centres at +0.5), edges clamped.
 fn bilinear(img: &Image, x: f32, y: f32) -> [f32; 3] {
     let (w, h) = (img.width(), img.height());
-    let (x, y) = ((x - 0.5).clamp(0.0, (w - 1) as f32), (y - 0.5).clamp(0.0, (h - 1) as f32));
-    let (x0, y0) = (x as usize, y as usize);
-    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-    let (tx, ty) = (x - x0 as f32, y - y0 as f32);
     let mut out = [0.0f32; 3];
-    for (c, plane) in img.channels().iter().enumerate().take(3) {
-        let at = |x: usize, y: usize| plane[y * w + x];
-        let top = at(x0, y0) + tx * (at(x1, y0) - at(x0, y0));
-        let bottom = at(x0, y1) + tx * (at(x1, y1) - at(x0, y1));
-        out[c] = top + ty * (bottom - top);
+    for (o, plane) in out.iter_mut().zip(img.channels()) {
+        *o = crate::image::bilinear_clamped(plane, w, h, x, y);
     }
     out
 }

@@ -230,19 +230,7 @@ pub fn image_scale(img: &Image, analysis: &Analysis, body: crate::capture::Body,
 /// Box-average to at most `max_side`; returns the image, its size and the scale factor.
 pub(crate) fn downsample(plane: &[f32], w: usize, h: usize, max_side: usize) -> (Vec<f32>, usize, usize, f32) {
     let f = w.max(h).div_ceil(max_side).max(1);
-    let (dw, dh) = (w / f, h / f);
-    let mut out = vec![0.0f32; dw * dh];
-    for y in 0..dh {
-        for x in 0..dw {
-            let mut acc = 0.0;
-            for sy in 0..f {
-                let row = &plane[(y * f + sy) * w + x * f..(y * f + sy) * w + x * f + f];
-                acc += row.iter().sum::<f32>();
-            }
-            out[y * dw + x] = acc / (f * f) as f32;
-        }
-    }
-    (out, dw, dh, f as f32)
+    (crate::image::downscale_plane(plane, w, h, f), (w / f).max(1), (h / f).max(1), f as f32)
 }
 
 /// Otsu's threshold: the level that best separates the histogram into two classes.

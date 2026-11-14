@@ -645,11 +645,8 @@ fn planet(out: &mut Identification, lum: &[f32], w: usize, h: usize, body: Body,
 const MOON_WORK_SIDE: usize = 900;
 
 fn downsample(lum: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize, usize) {
-    let f = w.max(h).div_ceil(MOON_WORK_SIDE).max(1);
-    if f == 1 {
-        return (lum.to_vec(), w, h, 1);
-    }
-    (crate::image::downscale_plane(lum, w, h, f), (w / f).max(1), (h / f).max(1), f)
+    let (small, sw, sh, f) = crate::analysis::downsample(lum, w, h, MOON_WORK_SIDE);
+    (small, sw, sh, f as usize)
 }
 
 /// The limb's circle (centre, radius) on the small image, from the sharp edge where the

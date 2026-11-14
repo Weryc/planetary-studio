@@ -66,7 +66,7 @@ fn load(dir: &str) -> Vec<Clean> {
             if w < CROP || h < CROP {
                 return None;
             }
-            let y: Vec<f32> = b[8..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+            let y: Vec<f32> = b[8..].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
             let scale = normalise(&y);
             let mut lit: Vec<f32> = y.iter().step_by(3).copied().filter(|&v| v > 0.15 * scale).collect();
             if lit.is_empty() {

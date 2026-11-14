@@ -62,6 +62,47 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T,
     changed
 }
 
+/// A small «?» that explains on hover: the place for descriptions that would otherwise take up
+/// room in the panel.
+pub fn help_icon(ui: &mut Ui, text: &str) -> Response {
+    ui.add(egui::Label::new(egui_material_icons::icons::ICON_HELP.rich_text().size(theme::size::ICON_SMALL).color(TEXT_WEAK)).sense(Sense::hover()))
+        .on_hover_cursor(egui::CursorIcon::Help)
+        .on_hover_text(text)
+}
+
+/// A number with − and + buttons, moving by `step` and kept on the step's grid within `range`.
+pub fn stepper(ui: &mut Ui, value: &mut f32, range: RangeInclusive<f32>, step: f32, prefix: &str) -> Response {
+    let (lo, hi) = (*range.start(), *range.end());
+    let snap = |v: f32| ((v / step).round() * step).clamp(lo, hi);
+    let mut changed = false;
+    let mut response = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 1.0;
+            let size = Vec2::splat(ui.spacing().interact_size.y - 4.0);
+            let step_button = |ui: &mut Ui, icon: MaterialIcon, enabled: bool| {
+                ui.add_enabled(enabled, egui::Button::new(icon.rich_text().size(theme::size::ICON_SMALL)).frame(false).min_size(size))
+            };
+            if step_button(ui, egui_material_icons::icons::ICON_REMOVE, *value > lo + 1e-4).clicked() {
+                *value = snap(*value - step);
+                changed = true;
+            }
+            let drag = egui::DragValue::new(&mut *value).range(range).speed(step * 0.2).fixed_decimals(1).prefix(prefix);
+            if ui.add(drag).changed() {
+                *value = snap(*value);
+                changed = true;
+            }
+            if step_button(ui, egui_material_icons::icons::ICON_ADD, *value < hi - 1e-4).clicked() {
+                *value = snap(*value + step);
+                changed = true;
+            }
+        })
+        .response;
+    if changed {
+        response.mark_changed();
+    }
+    response
+}
+
 /// Frameless icon button with tooltip.
 pub fn icon_button(ui: &mut Ui, icon: MaterialIcon, tooltip: &str) -> Response {
     ui.add(egui::Button::new(icon.rich_text().size(theme::size::ICON)).frame(false)).on_hover_text(tooltip)
@@ -182,7 +223,9 @@ impl<'a, N: emath::Numeric> ParamSlider<'a, N> {
             }
             let response = ui.add(slider);
             changed |= response.changed();
-            if response.double_clicked() {
+            // The slider only senses drags, so its own response never reports a double click:
+            // read it from the pointer while it is over the slider.
+            if response.hovered() && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
                 *self.value = self.default;
                 changed = true;
             }
@@ -213,9 +256,9 @@ fn fmt_default(v: f64, decimals: usize) -> String {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HistogramMode {
     /// Luminance, in grey.
-    #[default]
     Luminance,
     /// Red, green and blue, overlaid.
+    #[default]
     Rgb,
 }
 

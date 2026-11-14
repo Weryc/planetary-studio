@@ -30,10 +30,6 @@ use crate::capture::Body;
 use serde::{Deserialize, Serialize};
 use crate::learned_data as d;
 
-/// Whether the automatic sharpening starts from the learned curve (else from the fixed
-/// Standard one, the learned curve being offered in the card's curve menu).
-pub const IN_USE: bool = true;
-
 /// Where the response is described: frequency over the cut-off.
 pub const GRID: [f32; STEPS] = [0.1, 0.15, 0.25, 0.35, 0.5, 0.7, 0.85, 1.0, 1.15, 1.3, 1.5, 1.7, 2.0, 2.4];
 
@@ -184,7 +180,9 @@ pub fn nights(analysis: &Analysis) -> Vec<NightCurve> {
 /// Whether the night hypotheses give curves different enough to be worth comparing: somewhere
 /// up to the cut-off two of them differ by more than 35 %.
 pub fn nights_differ(curves: &[NightCurve]) -> bool {
-    let ln = |s: f32, t: &[(f32, f32)], r: f32| (1.0 + 11.0 * s).ln() * shape_at(t, r);
+    // At one strength for all (their mean): the hypotheses are compared by shape alone.
+    let mean = curves.iter().map(|c| c.1).sum::<f32>() / curves.len().max(1) as f32;
+    let ln = |_s: f32, t: &[(f32, f32)], r: f32| (1.0 + 11.0 * mean).ln() * shape_at(t, r);
     curves.len() >= 2
         && GRID.iter().filter(|&&r| r <= 1.0).any(|&r| {
             let v: Vec<f32> = curves.iter().map(|(_, s, t)| ln(*s, t, r)).collect();

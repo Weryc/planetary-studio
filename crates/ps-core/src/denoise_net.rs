@@ -84,7 +84,7 @@ impl Net {
         if body.len() != weight_count() * 4 {
             return None;
         }
-        let mut values = body.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+        let mut values = body.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c));
         let layers = LAYERS
             .iter()
             .map(|&(cin, cout, stride)| {

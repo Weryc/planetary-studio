@@ -92,9 +92,9 @@ pub fn apply(ctx: &egui::Context) {
         .into();
 
         let s = &mut style.spacing;
-        s.item_spacing = Vec2::new(8.0, 6.0);
+        s.item_spacing = Vec2::new(8.0, 4.0);
         s.button_padding = Vec2::new(10.0, 5.0);
-        s.interact_size.y = 26.0;
+        s.interact_size.y = 22.0;
         s.slider_width = 220.0;
         s.menu_margin = Margin::same(6);
         s.window_margin = Margin::same(12);

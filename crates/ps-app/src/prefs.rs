@@ -71,6 +71,8 @@ pub struct Preferences {
     #[serde(default = "default_keywords")]
     pub export_keywords: Vec<crate::naming::NameKeyword>,
     /// How the levels and curves histograms are drawn.
+    /// (Renamed so that settings saved while grey was the default start in colour.)
+    #[serde(rename = "histogram_colour_mode")]
     pub histogram_mode: crate::widgets::HistogramMode,
     /// Folded thematic groups and layer sections, by name.
     pub collapsed_sections: HashSet<String>,

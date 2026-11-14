@@ -25,14 +25,21 @@ Get the latest version from the **[Releases page](../../releases/latest)**:
 - **macOS** — right-click the app → *Open* → *Open*. On recent macOS versions: *System Settings → Privacy & Security → Open Anyway*.
 - **Windows** — on the SmartScreen dialog click *More info* → *Run anyway*.
 
+## What's new in 0.4.0
+
+- **Learned noise reduction** — a small neural network (a U-Net of about 146 thousand weights, trained on simulated stacks of sharp Hubble, Cassini, SDO and NASA images with realistic noise: photon noise, correlated grain, sky pedestal) removes the noise after deconvolution and before wavelets. On held-out images its error is about half that of the classic methods. It runs on the CPU, needs no download, and is the automatic choice for every subject; the old methods stay available.
+- **Masks work like adjustment layers** — a mask you paint now starts with nothing and applies only what you switch on (wavelets, noise, contrast, smart sharpening, tone, colour) on top of the result so far. Each mask has a **blend mode** (Normal, Darken, Multiply, Colour burn, Lighten, Screen, Colour dodge, Overlay, Soft light, Hard light, Difference, Colour, Luminosity), as in an image editor. Files saved with older masks open unchanged.
+- **Smart sharpening** — the learned sharpening is renamed from *Final sharpening*, with a response-curve shape control.
+- **Tidier interface** — the Identify tab is now two collapsible cards, and several panels were reorganised.
+
 ## Features
 
 - **Automatic recognition** of the subject (planet, Saturn, full disk, lunar surface) with structural settings and explanations of every automatic choice.
 - **Deconvolution** — Richardson–Lucy (accelerated, with TV regularisation and damping) and Wiener; PSF measured from the image, drawn on a box, or picked from a star; built-in anti-ringing.
 - **Wavelets** — isotropic starlet (*à trous*) with free scales placed from the image spectrum, or classic 1-2-4-8 scales; noise-adaptive gains and edge protection.
-- **Learned final sharpening** — a small model picks how much to boost each size of detail, from the belts of Jupiter down to the finest detail the seeing left; the pixels are always computed by classic wavelets, nothing is invented. It was trained on sharp Hubble, Cassini, SDO and NASA images seen through simulated lucky-imaging seeing (hundreds of turbulent frames, the best aligned and stacked). When the image can't tell how turbulent the night was, it shows the result under calm, average and turbulent seeing side by side, and it explains its choice: the belts and zones it measured, where the detail ends, what weighed most.
-- **Noise reduction** tuned per subject, **dering** with a brush: paint over the dark ring (inside the limb, in the sky around it, beside a crater) and it is measured and lifted to its surroundings, edges and belts untouched, **curves and levels** (per channel), **colour**, RGB alignment, Mineral Moon.
-- **Masks** — process Saturn's rings, its globe, the moons or a painted zone with their own settings. A clear list shows each mask's thumbnail, what it changes and its order (drag to reorder).
+- **Learned smart sharpening** — a small model picks how much to boost each size of detail, from the belts of Jupiter down to the finest detail the seeing left; the pixels are always computed by classic wavelets, nothing is invented. It was trained on sharp Hubble, Cassini, SDO and NASA images seen through simulated lucky-imaging seeing (hundreds of turbulent frames, the best aligned and stacked). When the image can't tell how turbulent the night was, it shows the result under calm, average and turbulent seeing side by side, and it explains its choice: the belts and zones it measured, where the detail ends, what weighed most.
+- **Noise reduction** — learned (neural network) or classic methods tuned per subject, **dering** with a brush: paint over the dark ring (inside the limb, in the sky around it, beside a crater) and it is measured and lifted to its surroundings, edges and belts untouched, **curves and levels** (per channel), **colour**, RGB alignment, Mineral Moon.
+- **Masks** — process Saturn's rings, its globe, the moons or a painted zone with their own settings, laid over the image with a blend mode. A clear list shows each mask's thumbnail, what it changes and its order (drag to reorder).
 - **A/B compare**, split before/after view, ROI preview.
 - **Equipment & diagnostics** — telescope/camera catalogue, FireCapture/SharpCap/AutoStakkert! log reading, image scale from ephemerides, spectrum graph.
 - **Identify & label** — names of the moons of Jupiter and Saturn, lunar craters and maria, solar orientation, from the capture time; export with the names on the image.
@@ -57,9 +64,9 @@ All pictures are the author's own captures, processed in the app.
 
 ### Learned sharpening, explained
 
-<img src="docs/screenshots/learned-sharpening.png" width="360" align="right" alt="The final sharpening card: three guesses at the seeing and why the curve is shaped so">
+<img src="docs/screenshots/learned-sharpening.png" width="360" align="right" alt="The smart sharpening card: three guesses at the seeing and why the curve is shaped so">
 
-The final sharpening card with the learned curve on Jupiter:
+The smart sharpening card with the learned curve on Jupiter:
 
 - **Three guesses at the seeing** — the subject under calm, average and turbulent seeing; click the one that looks right.
 - **Why this curve** — what was measured (finest detail, dark belts and bright zones with their widths, subject, signal over noise) and which of them pushed the curve up or down.
