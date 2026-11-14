@@ -7,7 +7,8 @@
 //! luminance and on R, G, B, the model pushed ×1.5, the truth's own best curve; BlurXTerminator
 //! where it ran. The error is RMS against the truth inside the subject, over the error with no
 //! sharpening: on the luminance, and for colour truths on the chroma (R − L, B − L) too.
-//! Writes `out_dir/eval.json` and strips. With the optional arguments, the real stacks are
+//! Writes `out_dir/eval.json` and strips; results are kept truth by truth in
+//! `out_dir/eval.partial.jsonl`, so an interrupted run resumes where it stopped. With the optional arguments, the real stacks are
 //! shown side by side too: original | today | model | model on R, G, B | BXT.
 #[path = "ml_common/mod.rs"]
 mod ml;
@@ -100,11 +101,17 @@ fn main() {
     std::fs::create_dir_all(&out).unwrap();
     let rows = read_rows(Path::new(&format!("{dir}/dataset.tsv")));
     let nights = Nights::new();
-    let mut json = String::from("{\"results\": [\n");
-    let mut first = true;
+    // Each truth's results are appended to a partial file as soon as it is done: an interrupted
+    // run picks up from where it stopped.
+    let partial = Path::new(&out).join("eval.partial.jsonl");
+    let done: std::collections::HashSet<String> = std::fs::read_to_string(&partial).unwrap_or_default().lines().filter_map(|l| l.split('"').nth(3).map(str::to_string)).collect();
     for line in std::fs::read_to_string(format!("{dir}/pairs.tsv")).unwrap().lines() {
         let c: Vec<&str> = line.split('\t').collect();
         let (name, key) = (c[0], c[1]);
+        if done.contains(name) {
+            continue;
+        }
+        let mut json = String::new();
         let sq: (usize, usize, usize) = (c[2].parse().unwrap(), c[3].parse().unwrap(), c[4].parse().unwrap());
         let k: f32 = c[5].parse().unwrap();
         let Ok(truth) = ps_io::load(Path::new(&format!("{dir}/pairs/{key}.png"))) else { continue };
@@ -137,10 +144,6 @@ fn main() {
                 let oracle = row.wiener.and_then(|t| pushed(&a, t, 1.0)).map(|p| score(&sharpen(&degraded, &p)));
                 let bxt = ps_io::load(Path::new(&format!("{dir}/bxt/{key}_{variant}_bxt.tif"))).ok();
                 let num = |v: Option<f32>| v.map_or("null".into(), |v| format!("{v:.4}"));
-                if !first {
-                    json.push_str(",\n");
-                }
-                first = false;
                 write!(
                     json,
                     "  {{\"name\": \"{name}\", \"group\": \"{}\", \"variant\": \"{variant}\", \"night\": \"{}\", \"kind\": \"{:?}\", \"fixed\": {:.4}, \"model\": {}, \"model_rgb\": {}, \"model_x1.5\": {}, \"oracle\": {}, \"bxt\": {}, \"c_fixed\": {}, \"c_model\": {}, \"c_model_rgb\": {}, \"c_bxt\": {}, \"model_strength\": {}}}",
@@ -160,6 +163,7 @@ fn main() {
                     num(ps_core::learned::to_smart(*model).map(|s| s.0))
                 )
                 .unwrap();
+                json.push('\n');
                 if (i, j) == (1, 1)
                     && let Some(l) = &lum_mode
                 {
@@ -176,10 +180,12 @@ fn main() {
                 }
             }
         }
+        use std::io::Write as _;
+        std::fs::OpenOptions::new().create(true).append(true).open(&partial).unwrap().write_all(json.as_bytes()).unwrap();
         eprintln!("{name:<40} {:.0} s", started.elapsed().as_secs_f32());
     }
-    json.push_str("\n]}\n");
-    std::fs::write(Path::new(&out).join("eval.json"), json).unwrap();
+    let all: Vec<String> = std::fs::read_to_string(&partial).unwrap().lines().map(str::to_string).collect();
+    std::fs::write(Path::new(&out).join("eval.json"), format!("{{\"results\": [\n{}\n]}}\n", all.join(",\n"))).unwrap();
 
     // The real stacks, side by side, with the model as the app has it (trained on everything).
     let Some(cache) = args.next() else { return };

@@ -9,6 +9,7 @@ pub mod capture;
 pub mod color;
 pub mod conv;
 pub mod deconv;
+pub mod denoise_net;
 pub mod dering;
 pub mod enhance;
 pub mod ephemeris;

@@ -43,6 +43,10 @@ pub struct SmartParams {
     pub peak: f32,
     /// Less boost where edges meet the sky (limb, rings), 0‥1.
     pub limb_protection: f32,
+    /// Width of the limb protection's band, as a multiple of the halo a boost at the peak
+    /// leaves (1 = just that halo). Wider on Saturn, whose limb and ring edges grain up after
+    /// stacking (alignment is worse there).
+    pub limb_width: f32,
     /// Sharpen each zone by its own detail and noise (else uniformly).
     pub adaptive: bool,
     /// Shape of the boost across sizes of detail.
@@ -138,6 +142,7 @@ impl Default for SmartParams {
             cutoff: 0.0,
             peak: 1.0,
             limb_protection: 0.3,
+            limb_width: 1.0,
             adaptive: true,
             curve: SmartCurve::Standard,
             color: ColorMode::Luminance,
@@ -211,7 +216,7 @@ impl SmartParams {
     /// What [`prepare`] depends on (besides the images).
     pub fn prepare_key(&self) -> PrepareKey {
         let learned = self.table().iter().fold(0u64, |h, &(r, v)| h.rotate_left(7) ^ (u64::from(r.to_bits()) << 32 | u64::from(v.to_bits())));
-        PrepareKey { cutoff: self.cutoff.to_bits(), peak: self.peak.to_bits(), curve: self.curve, learned, adaptive: self.adaptive, color: self.color }
+        PrepareKey { cutoff: self.cutoff.to_bits(), peak: self.peak.to_bits(), curve: self.curve, learned, adaptive: self.adaptive, color: self.color, limb_width: self.limb_width.to_bits() }
     }
 
     /// The overall response wanted at `f` given what earlier steps did (`done`): never below 1
@@ -314,8 +319,9 @@ fn layer_share(layer: &[f32], sigma: f32, brightness: &[f32], w: usize, h: usize
 
 /// Where the limb protection acts (0‥1): the edges against the sky widened, inwards and
 /// outwards, by the size of the halo a boost peaking at `fp` cycles/px leaves.
-fn limb_band(edges: &[f32], w: usize, h: usize, fp: f32) -> Vec<f32> {
-    let r = (1.2 / fp.max(1e-3)).clamp(3.0, 20.0);
+fn limb_band(edges: &[f32], w: usize, h: usize, fp: f32, width: f32) -> Vec<f32> {
+    let width = width.clamp(0.5, 8.0);
+    let r = (1.2 / fp.max(1e-3)).clamp(3.0, 20.0) * width;
     let (_, grown) = crate::dering::min_max(edges, w, h, r.round() as usize);
     crate::mask::gaussian_approx(&grown, w, h, r / 3.0).into_iter().map(|v| v.clamp(0.0, 1.0)).collect()
 }
@@ -329,6 +335,7 @@ pub struct PrepareKey {
     learned: u64,
     adaptive: bool,
     color: ColorMode,
+    limb_width: u32,
 }
 
 /// One working plane, ready to be sharpened at any strength.
@@ -373,7 +380,7 @@ fn prepare_plane(plane: &[f32], before: Option<&[f32]>, w: usize, h: usize, p: &
     let Some(mut d) = decompose(plane, w, h, &transform, &|| false) else {
         return PreparedPlane { cutoff, transform, layers: Vec::new(), band: vec![0.0; plane.len()], done };
     };
-    let band = limb_band(d.edges(), w, h, fp);
+    let band = limb_band(d.edges(), w, h, fp, p.limb_width);
     let light = if p.adaptive { Some(brightness(plane, w, h)) } else { None };
     let mut layers = Vec::new();
     for (j, mut layer) in std::mem::take(&mut d.layers).into_iter().enumerate() {
@@ -509,7 +516,7 @@ pub fn hold_back_map(plane: &[f32], w: usize, h: usize, p: &SmartParams) -> (Vec
     let transform = transform(p.finest() * fp);
     let Some(d) = decompose(plane, w, h, &transform, &|| false) else { return (vec![0.0; plane.len()], vec![0.0; plane.len()]) };
     let protect = p.limb_protection.clamp(0.0, 1.0);
-    let edges = if protect > 0.0 { limb_band(d.edges(), w, h, fp).into_iter().map(|e| protect * e).collect() } else { vec![0.0; plane.len()] };
+    let edges = if protect > 0.0 { limb_band(d.edges(), w, h, fp, p.limb_width).into_iter().map(|e| protect * e).collect() } else { vec![0.0; plane.len()] };
     if !p.adaptive {
         return (vec![0.0; plane.len()], edges);
     }
@@ -545,7 +552,7 @@ pub fn resolution_map(plane: &[f32], w: usize, h: usize, p: &SmartParams, subjec
     let transform = transform((1.5 * cutoff).min(0.5));
     let Some(d) = decompose(plane, w, h, &transform, &|| false) else { return vec![0.0; plane.len()] };
     // The limb against the sky holds energy at every scale without being detail: left out.
-    let limb = limb_band(d.edges(), w, h, cutoff);
+    let limb = limb_band(d.edges(), w, h, cutoff, 1.0);
     let stride = plane.len().div_ceil(1 << 16).max(1);
     let inside: Vec<usize> = match subject.filter(|m| m.len() == plane.len()) {
         Some(m) => (0..plane.len()).step_by(stride).filter(|&i| m[i] > 0.5 && limb[i] < 0.3).collect(),

@@ -10,6 +10,7 @@ use ps_core::learned::STEPS;
 use std::path::Path;
 
 pub mod seeing;
+pub mod truths;
 
 /// Load an image; also reads the uncompressed 32-bit float TIFFs written by ImageJ (any
 /// range), which the app's loader refuses. Values are scaled to 0‥1.
@@ -419,4 +420,35 @@ pub fn degrade(truth: &Image, name: &str, nights: &Nights, k: f32, i: usize, j: 
 
 pub fn variant_name(i: usize, j: usize) -> String {
     format!("{}_snr{}", seeing::NIGHTS[i].label, SNRS[j] as usize)
+}
+
+/// `Kind:width:protection` arguments: limb protection to use for that kind of subject.
+#[allow(dead_code)]
+pub fn limb_overrides(args: impl Iterator<Item = String>) -> std::collections::HashMap<String, (f32, f32)> {
+    args.filter_map(|a| {
+        let v: Vec<&str> = a.split(':').collect();
+        if v.len() != 3 {
+            return None;
+        }
+        Some((v[0].to_string(), (v[1].parse().ok()?, v[2].parse().ok()?)))
+    })
+    .collect()
+}
+
+/// What a reference really shows, from its name (the analysis can mistake one for another at
+/// small sizes): "Jupiter", "Saturn", "Mars", "Moon" or "Sun".
+#[allow(dead_code)]
+pub fn subject_of(group: &str) -> &'static str {
+    let g = group.to_lowercase();
+    if g.starts_with("moon") {
+        "Moon"
+    } else if g.starts_with("sun") || g.starts_with("sdo") {
+        "Sun"
+    } else if ["heic1609a", "heic1814c", "opo0322"].iter().any(|m| g.starts_with(m)) {
+        "Mars"
+    } else if ["heic1917a", "opo2043a", "heic1814b", "pia06193", "heic2312a", "heic2113c", "heic2612a"].iter().any(|s| g.starts_with(s)) {
+        "Saturn"
+    } else {
+        "Jupiter"
+    }
 }

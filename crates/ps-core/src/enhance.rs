@@ -1,4 +1,5 @@
-//! Finishing tools: noise reduction (one method for planets, one for the Moon and Sun),
+//! Finishing tools: noise reduction (one method for planets, one for the Moon and Sun, and a
+//! learned one for all),
 //! contrast (unsharp mask and local contrast) and tone (levels and curve).
 //!
 //! All of them work on luminance Y and add the change back to R, G and B, so colours keep
@@ -23,6 +24,10 @@ pub enum NoiseMethod {
     /// Edge-preserving (bilateral) smoothing. Lunar and solar surfaces are full of sharp
     /// edges (crater rims, shadows, granulation): they must survive while flat areas are cleaned.
     Lunar,
+    /// A small network trained on simulated planetary, lunar and solar stacks
+    /// ([`crate::denoise_net`]): it tells noise from detail by what that detail looks like.
+    /// Falls back to [`NoiseMethod::Planetary`] if this build has no weights.
+    Learned,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -30,7 +35,7 @@ pub struct NoiseParams {
     pub method: NoiseMethod,
     /// Overall strength, in units of the measured noise (1 = standard).
     pub strength: f32,
-    /// Lunar method: share of fine detail given back after smoothing (0‥1).
+    /// Lunar and learned methods: share of fine detail given back after cleaning (0‥1).
     pub detail: f32,
     /// Chroma noise reduction (starlet scales averaged away from the colour, 0 = off).
     pub chroma: u32,
@@ -56,8 +61,13 @@ pub fn denoise(img: &Image, p: &NoiseParams) -> Image {
     let y = working_planes(img, ColorMode::Luminance).swap_remove(0);
     let sigma = estimate_noise(&y, w, h).max(1e-5);
 
-    let mut cleaned = match p.method {
-        NoiseMethod::Planetary => {
+    let learned = (p.method == NoiseMethod::Learned).then(crate::denoise_net::model).flatten();
+    let mut cleaned = match (p.method, learned) {
+        (NoiseMethod::Learned, Some(net)) => {
+            let clean = crate::denoise_net::denoise(net, &y, w, h, sigma, p.strength, &|| false).expect("never cancelled");
+            clean.par_iter().zip(&y).map(|(&s, &o)| s + p.detail.clamp(0.0, 1.0) * (o - s)).collect()
+        }
+        (NoiseMethod::Planetary | NoiseMethod::Learned, _) => {
             // Thresholds per scale in units of that scale's noise σ (finest first).
             let k = [2.2, 1.4, 0.7].map(|v| v * p.strength);
             let layers = k.iter().map(|&denoise| WaveletLayer { gain: 0.0, denoise, ..Default::default() }).collect();
@@ -67,7 +77,7 @@ pub fn denoise(img: &Image, p: &NoiseParams) -> Image {
             d.noise = d.white_noise.clone();
             recompose(&d, &params)
         }
-        NoiseMethod::Lunar => {
+        (NoiseMethod::Lunar, _) => {
             let smooth = bilateral(&y, w, h, 1.5, 2.5 * sigma * p.strength.max(0.05));
             smooth.par_iter().zip(&y).map(|(&s, &o)| s + p.detail.clamp(0.0, 1.0) * (o - s)).collect()
         }

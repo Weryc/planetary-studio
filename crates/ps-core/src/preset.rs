@@ -110,6 +110,20 @@ fn moffat_beta(kind: ImageKind, analysis: &Analysis) -> f32 {
 }
 
 /// Noisier data → stronger denoising and damping; very clean data → lighter.
+/// The automatic noise reduction. With the learned network in this build, that: it measures the
+/// noise itself, so only the chosen strength scales it (a little gentler on Saturn's thin ring
+/// divisions), and a tenth of the fine texture goes back so surfaces don't look waxy. Without
+/// it, the classic method for the kind, scaled by the signal-to-noise ratio.
+fn auto_noise(kind: ImageKind, analysis: &Analysis, cleaning: f32) -> NoiseParams {
+    let b = base(kind).noise;
+    if crate::denoise_net::available() {
+        let strength = if kind == ImageKind::Saturn { 0.9 } else { 1.0 };
+        NoiseParams { method: NoiseMethod::Learned, strength: strength * cleaning, detail: 0.1, ..b }
+    } else {
+        NoiseParams { strength: b.strength * noise_factor(analysis) * cleaning, ..b }
+    }
+}
+
 fn noise_factor(analysis: &Analysis) -> f32 {
     (60.0 / analysis.snr.max(1.0)).clamp(0.6, 2.0)
 }
@@ -259,19 +273,29 @@ pub fn deconv_structure(kind: ImageKind, analysis: &Analysis) -> DeconvParams {
     }
 }
 
+/// Limb protection on Saturn and on the other planets: (strength, width as a multiple of the
+/// halo). Wider than the halo alone: stacks grain up along the limb (worse alignment there),
+/// which the simulated references don't have. Measured (`ml_zone`, `ml_zone_real`): on the
+/// user's Saturns the grain added near the limb over the centre's goes from 0.42–0.51 to
+/// 0.37–0.41 (BlurXTerminator 0.38–0.41), on Jupiter from 0.42 to 0.38; the simulated error in
+/// the outer ring rises 0.585 → 0.67 on Saturn, 0.398 → 0.41 on planets, the centre unchanged.
+pub const SATURN_LIMB: (f32, f32) = (0.45, 2.0);
+pub const PLANET_LIMB: (f32, f32) = (0.3, 2.0);
+
 /// "Nitidezza intelligente" for the image: the cut-off from the analysis and the equipment,
 /// where to put the peak, how much to spare the limb and whether there is a sky to leave out,
 /// by kind of subject. Planets' belts
 /// and festoons, the Moon's crater rims and the Sun's filaments carry real detail almost up to
 /// the cut-off; a disk on black sky halos at its limb, a surface has no limb.
 pub fn smart_structure(kind: ImageKind, analysis: &Analysis) -> crate::smart::SmartParams {
-    let (peak, limb_protection) = match kind {
+    let (peak, limb_protection, limb_width) = match kind {
         // Low: inside the disk it changes nothing and the limb rarely needs much; the map in
         // the card shows where it acts, so it can be raised where halos appear.
-        ImageKind::Planet => (1.0, 0.25),
-        ImageKind::Saturn => (1.0, 0.3),
-        ImageKind::FullDisk => (1.0, 0.2),
-        ImageKind::Surface => (1.0, 0.0),
+        ImageKind::Planet => (1.0, PLANET_LIMB.0, PLANET_LIMB.1),
+        // Wider and stronger: stacks grain up along Saturn's limb and ring edges.
+        ImageKind::Saturn => (1.0, SATURN_LIMB.0, SATURN_LIMB.1),
+        ImageKind::FullDisk => (1.0, 0.2, 1.0),
+        ImageKind::Surface => (1.0, 0.0, 1.0),
     };
     // A surface has no sky: its dark parts are shadows, part of the subject.
     let include_sky = kind == ImageKind::Surface;
@@ -281,7 +305,7 @@ pub fn smart_structure(kind: ImageKind, analysis: &Analysis) -> crate::smart::Sm
     let curve = if crate::learned::IN_USE && !learned.is_empty() { SmartCurve::Learned } else { SmartCurve::Standard };
     let color = if curve == SmartCurve::Learned { learned_colour(analysis) } else { crate::color::ColorMode::Luminance };
     let learned_nights = crate::learned::nights(analysis);
-    crate::smart::SmartParams { cutoff: detail_cutoff(analysis).unwrap_or(0.0), peak, limb_protection, include_sky, curve, learned, learned_strength, learned_nights, color, ..Default::default() }
+    crate::smart::SmartParams { cutoff: detail_cutoff(analysis).unwrap_or(0.0), peak, limb_protection, limb_width, include_sky, curve, learned, learned_strength, learned_nights, color, ..Default::default() }
 }
 
 /// Highest strength the automatic sharpening takes from the learned model.
@@ -299,8 +323,8 @@ pub fn learned_colour(analysis: &Analysis) -> crate::color::ColorMode {
 }
 
 /// The automatic "Nitidezza intelligente": the structure with a strength by kind and by how
-/// hard the user wants it pushed (it isn't part of the full automatic processing, which uses
-/// the wavelets: the two are alternatives).
+/// hard the user wants it pushed. With the learned curve it is also part of the full automatic
+/// processing (after the deconvolution and the wavelets, adding what they left out).
 pub fn auto_smart(kind: ImageKind, analysis: &Analysis, strength: AutoStrength) -> crate::smart::SmartParams {
     let base: f32 = match kind {
         ImageKind::Surface | ImageKind::FullDisk => 0.4,
@@ -356,12 +380,18 @@ pub fn auto_pipeline_with(kind: ImageKind, analysis: &Analysis, strength: AutoSt
     let worth_aligning = shift.red.iter().chain(&shift.blue).any(|v| v.abs() > 0.25);
     // BlurXTerminator's nonstellar PSF diameter is a FWHM: 2.355 σ.
     let bxt = BxtParams { psf_diameter: (2.3548 * sigma).clamp(0.5, 8.0), ..Default::default() };
+    // The final sharpening brings the whole to the learned curve: it measures what the
+    // deconvolution and the wavelets already did and adds only what is missing (cleaning the
+    // grain past the detail). Without a learned answer it stays neutral, as before.
+    let smart = auto_smart(kind, analysis, strength);
+    let smart = if smart.curve == crate::smart::SmartCurve::Learned { smart } else { crate::smart::SmartParams { strength: 0.0, ..smart } };
     Pipeline {
         align: Module { enabled: worth_aligning, params: shift },
         bxt: Module::off(bxt),
         deconv: Module::on(deconv),
-        denoise: Module::on(NoiseParams { strength: b.noise.strength * noise * cleaning, ..b.noise }),
+        denoise: Module::on(auto_noise(kind, analysis, cleaning)),
         wavelet: Module::on(wavelet),
+        smart: Module::on(smart),
         // It does nothing until the user paints over a ring.
         dering: Module::on(dering_structure(kind, analysis)),
         ..Default::default()
@@ -583,16 +613,22 @@ pub fn explain(kind: ImageKind, analysis: &Analysis, scales: ScaleMode) -> Expla
         wavelet.push(tl("Progressione diadica (1·2·4·8…): ogni livello raddoppia la scala, così pochi livelli coprono tutte le dimensioni dei dettagli.").into());
     }
 
-    let mut denoise = vec![match b.noise.method {
+    let noise = auto_noise(kind, analysis, 1.0);
+    let mut denoise = vec![match noise.method {
         NoiseMethod::Planetary => tl("Metodo Pianeti: il rumore è una grana fine sopra dettagli morbidi; toglierlo dalle 3 scale più fini lascia intatte bande e festoni.").to_string(),
         NoiseMethod::Lunar => tl("Metodo Luna e Sole: crateri, ombre e granulazione hanno bordi netti; il filtro bilaterale media solo pixel simili e non li ammorbidisce.").to_string(),
+        NoiseMethod::Learned => tl("Metodo appreso: una piccola rete addestrata su stack simulati di pianeti, Luna e Sole riconosce il dettaglio dal suo aspetto e toglie solo il rumore.").to_string(),
     }];
     denoise.push(match kind {
         ImageKind::Saturn => tl("Intensità ridotta: anche le divisioni sottili degli anelli sono dettaglio fine e non vanno cancellate.").into(),
         ImageKind::Surface => tl("Pulizia del cielo a zero: in un'immagine di superficie non c'è cielo.").into(),
         _ => tl("Pulizia del cielo alta: lo sfondo intorno al soggetto è nero e si può pulire a fondo.").into(),
     });
-    denoise.push(tr!("L'intensità tiene conto del rapporto segnale/rumore misurato (SNR {:.0}): più l'immagine è rumorosa, più la pulizia è forte.", "The strength takes the measured signal-to-noise ratio into account (SNR {:.0}): the noisier the image, the stronger the cleaning.", analysis.snr));
+    denoise.push(if noise.method == NoiseMethod::Learned {
+        tr!("La rete riceve il rumore misurato sull'immagine (SNR {:.0}) e pulisce in proporzione; Intensità 1 = rumore preso com'è.", "The network is given the noise measured on the image (SNR {:.0}) and cleans in proportion; Strength 1 = the noise as measured.", analysis.snr)
+    } else {
+        tr!("L'intensità tiene conto del rapporto segnale/rumore misurato (SNR {:.0}): più l'immagine è rumorosa, più la pulizia è forte.", "The strength takes the measured signal-to-noise ratio into account (SNR {:.0}): the noisier the image, the stronger the cleaning.", analysis.snr)
+    });
 
     let bxt = vec![tr!("Diametro PSF {:.1} px: è la FWHM della sfocatura misurata (2,355 × σ). La stima automatica di BlurXTerminator usa le stelle, che in queste immagini non ci sono.", "PSF diameter {:.1} px: this is the FWHM of the measured blur (2.355 × σ). BlurXTerminator’s automatic estimate uses stars, which these images do not have.",
         (2.3548 * blur_core(kind, analysis)).clamp(0.5, 8.0)
@@ -638,7 +674,7 @@ fn with_structure(current: &Pipeline, structure: &Pipeline) -> Pipeline {
     p.denoise.params.method = structure.denoise.params.method;
     p.bxt.params.psf_diameter = structure.bxt.params.psf_diameter;
     let (m, s) = (&mut p.smart.params, &structure.smart.params);
-    (m.cutoff, m.peak, m.limb_protection, m.include_sky) = (s.cutoff, s.peak, s.limb_protection, s.include_sky);
+    (m.cutoff, m.peak, m.limb_protection, m.limb_width, m.include_sky) = (s.cutoff, s.peak, s.limb_protection, s.limb_width, s.include_sky);
     // What the learned models answer for this image (the chosen curve stays the user's).
     (m.learned, m.learned_strength, m.learned_nights) = (s.learned.clone(), s.learned_strength, s.learned_nights.clone());
     if m.night.is_some_and(|n| !m.learned_nights.iter().any(|q| q.0 == n)) {
@@ -673,6 +709,8 @@ mod tests {
             planet: None,
             colour: false,
             bands: None,
+            red_spot: None,
+            rings: None,
         }
     }
 
