@@ -8,6 +8,8 @@ pub mod bxt;
 pub mod capture;
 pub mod color;
 pub mod conv;
+pub mod curve_net;
+mod curve_net_data;
 pub mod deconv;
 pub mod denoise_net;
 pub mod dering;
