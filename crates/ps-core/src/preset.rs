@@ -305,7 +305,24 @@ pub fn smart_structure(kind: ImageKind, analysis: &Analysis) -> crate::smart::Sm
     let curve = if !learned.is_empty() { SmartCurve::Learned } else { SmartCurve::Standard };
     let color = if curve == SmartCurve::Learned { learned_colour(analysis) } else { crate::color::ColorMode::Luminance };
     let learned_nights = crate::learned::nights(analysis);
-    crate::smart::SmartParams { cutoff: detail_cutoff(analysis).unwrap_or(0.0), peak, limb_protection, limb_width, include_sky, curve, learned, learned_strength, learned_nights, color, ..Default::default() }
+    // The subject's network, when there is one for it: offered beside the other curves.
+    let (network, network_strength, network_cutoff) = analysis.curve_net.as_ref().map_or((Vec::new(), 0.0, 0.0), |n| (n.table.clone(), n.strength, n.cutoff));
+    crate::smart::SmartParams {
+        cutoff: detail_cutoff(analysis).unwrap_or(0.0),
+        peak,
+        limb_protection,
+        limb_width,
+        include_sky,
+        curve,
+        learned,
+        learned_strength,
+        learned_nights,
+        color,
+        network,
+        network_strength,
+        network_cutoff,
+        ..Default::default()
+    }
 }
 
 /// Highest strength the automatic sharpening takes from the learned model.
@@ -716,6 +733,7 @@ mod tests {
             bands: None,
             red_spot: None,
             rings: None,
+            curve_net: None,
         }
     }
 

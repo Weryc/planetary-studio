@@ -911,4 +911,11 @@ pub static EN: &[(&str, &str)] = &[
     ("Tempeste e festoni", "Storms and festoons"),
     ("La Macchia Rossa", "The Great Red Spot"),
     ("Anelli e divisione di Cassini", "Rings and Cassini division"),
+    ("Rete per il soggetto (nuova)", "Network for the subject (new)"),
+    ("Curva prevista da una piccola rete addestrata per questo soggetto (per ora Giove) su stack simulati: centinaia di fotogrammi attraverso seeing e sensore, allineati e sommati davvero, confrontati con l'originale nitido. Guarda lo spettro del disco e il rumore nel cielo (se il cielo è stato tagliato a nero lo ignora) e sceglie quanto spingere ogni dimensione di dettaglio. Nitidezza e forma della risposta restano regolabili.", "Curve predicted by a small network trained for this subject (Jupiter for now) on simulated stacks: hundreds of frames through seeing and a sensor, really aligned and stacked, compared with the sharp original. It looks at the disk's spectrum and at the noise in the sky (ignored if the sky was clipped to black) and chooses how much to boost each size of detail. Sharpness and response shape stay adjustable."),
+    ("Rumore misurato nel cielo attorno al disco", "Noise measured in the sky around the disk"),
+    ("Le reti non sono d'accordo su questa immagine: confronta con le altre curve", "The networks disagree on this image: compare with the other curves"),
+    ("poco cielo attorno al disco", "little sky around the disk"),
+    ("cielo nero senza rumore (tagliato a zero)", "black sky without noise (clipped to zero)"),
+    ("cielo uniforme senza rumore", "uniform sky without noise"),
 ];

@@ -1041,7 +1041,27 @@ pub fn smart_body(ui: &mut Ui, p: &mut SmartParams, auto: &SmartParams, view: &m
         night_choice(ui, p, &learned);
         learned_why(ui, p, analysis);
     }
+    if p.curve == SmartCurve::Network {
+        network_note(ui, analysis);
+    }
     smart_rest(ui, p, view, legend, analysis);
+}
+
+/// What the network's curve rests on: the subject, the sky, how sure it is.
+fn network_note(ui: &mut Ui, analysis: &Analysis) {
+    let Some(n) = &analysis.curve_net else { return };
+    let mut lines = vec![tr!("Rete per {}: picco della spinta su dettagli di {:.1} px", "Network for {}: boost peaks on {:.1} px detail", n.body.label(), 1.0 / n.cutoff.max(1e-3))];
+    lines.push(match n.sky_note {
+        Some(why) => tr!("Cielo non usato: {}", "Sky not used: {}", tl(why)),
+        None => tl("Rumore misurato nel cielo attorno al disco").to_string(),
+    });
+    if n.spread > 0.3 {
+        lines.push(tl("Le reti non sono d'accordo su questa immagine: confronta con le altre curve").to_string());
+    }
+    ui.add_space(theme::space::XS);
+    for l in lines {
+        ui.label(RichText::new(l).size(theme::size::SMALL).color(TEXT_WEAK));
+    }
 }
 
 fn night_name(n: ps_core::learned::Night) -> &'static str {
@@ -1208,20 +1228,27 @@ fn smart_controls(ui: &mut Ui, p: &mut SmartParams, auto: &SmartParams, analysis
         ui.label(RichText::new(tl("Curva")).size(theme::size::BODY));
         crate::widgets::help_icon(ui, p.curve.description());
         egui::ComboBox::from_id_salt("smart-curve").width(170.0).selected_text(RichText::new(p.curve.label()).size(theme::size::BODY)).show_ui(ui, |ui| {
-            // The learned shape only when the model had an answer for this image.
+            // The learned shape only when the model had an answer for this image, the network's
+            // only when there is one for the subject.
             let learned = (!p.learned.is_empty()).then_some(SmartCurve::Learned);
-            for curve in learned.into_iter().chain(SmartCurve::ALL) {
+            let network = (!p.network.is_empty()).then_some(SmartCurve::Network);
+            for curve in network.into_iter().chain(learned).chain(SmartCurve::ALL) {
                 let text = (RichText::new(curve.label()).size(theme::size::BODY), RichText::new(if curve == auto.curve { tl("  predefinita") } else { "" }).size(theme::size::SMALL).color(TEXT_WEAK));
                 if ui.add(egui::Button::selectable(curve == p.curve, text)).on_hover_text(curve.description()).clicked() {
-                    // A learned shape comes with its own strength.
-                    let suggested = if curve == SmartCurve::Learned { p.learned_strength } else { 0.0 };
+                    // A learned shape comes with its own strength, the network's too.
+                    let suggested = match curve {
+                        SmartCurve::Learned => p.learned_strength,
+                        SmartCurve::Network => p.network_strength,
+                        _ => 0.0,
+                    };
                     if curve != p.curve && suggested > 0.0 {
                         p.strength = suggested;
                     }
                     // And with its own way of treating colour (R, G, B on a colour planet).
-                    if curve != p.curve && (curve == SmartCurve::Learned || p.curve == SmartCurve::Learned) {
+                    let own_colour = |c: SmartCurve| matches!(c, SmartCurve::Learned | SmartCurve::Network);
+                    if curve != p.curve && (own_colour(curve) || own_colour(p.curve)) {
                         p.color = match analysis {
-                            Some(a) if curve == SmartCurve::Learned => ps_core::preset::learned_colour(a),
+                            Some(a) if own_colour(curve) => ps_core::preset::learned_colour(a),
                             _ => auto.color,
                         };
                     }
@@ -1238,7 +1265,7 @@ fn smart_controls(ui: &mut Ui, p: &mut SmartParams, auto: &SmartParams, analysis
 /// The final sharpening's explanation, graph, map over the image and advanced settings.
 fn smart_rest(ui: &mut Ui, p: &mut SmartParams, view: &mut SmartView, legend: Option<(f32, f32)>, analysis: &Analysis) {
     ui.add_space(theme::space::S);
-    let period = if p.cutoff > 0.0 { format!("{:.1} px", 1.0 / p.cutoff) } else { tl("quello misurato sull'immagine").to_string() };
+    let period = if p.base_cutoff() > 0.0 { format!("{:.1} px", 1.0 / p.base_cutoff()) } else { tl("quello misurato sull'immagine").to_string() };
     ui.horizontal(|ui| {
         ui.label(subheading(tl("Curva di risposta")));
         crate::widgets::help_icon(ui, &tr!("Aggiunge solo la nitidezza che ancora manca, fino al dettaglio più fine misurato: {period}.", "Adds only the sharpness that is still missing, down to the finest measured detail: {period}."));
@@ -1337,7 +1364,7 @@ pub const SKY_COLOUR: [u8; 3] = [120, 120, 135];
 /// The target response: how much each size of detail is amplified (1 = unchanged). `bands`:
 /// the periods (px) a banded globe's belts and zones span, shaded.
 fn response_graph(ui: &mut Ui, p: &SmartParams, bands: Option<(f32, f32)>) {
-    let cutoff = if p.cutoff > 0.0 { p.cutoff } else { 0.2 };
+    let cutoff = if p.base_cutoff() > 0.0 { p.base_cutoff() } else { 0.2 };
     let width = ui.available_width() - 4.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 90.0), Sense::hover());
     let painter = ui.painter_at(rect);

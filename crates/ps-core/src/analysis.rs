@@ -99,6 +99,10 @@ pub struct Analysis {
     pub red_spot: Option<f32>,
     /// Saturn's rings: outer size and how deep the Cassini division is.
     pub rings: Option<crate::bands::Rings>,
+    /// The sharpening curve the subject's network suggests ([`crate::curve_net::suggestion`]):
+    /// set by the caller once the subject is known (the file name or the capture log can name
+    /// it better than the pixels).
+    pub curve_net: Option<crate::curve_net::Suggestion>,
 }
 
 pub fn analyze(img: &Image) -> Analysis {
@@ -116,7 +120,7 @@ pub fn analyze(img: &Image) -> Analysis {
     // A subject inside the frame is aligned by centroids; a surface by correlation.
     let rgb_shift = align::estimate_by_centroid(img);
     let (psf_sigma, psf_moffat, channel_sigma, spectral, power, optics) = (None, None, None, None, Vec::new(), None);
-    let base = Analysis { kind: ImageKind::Planet, confidence: Confidence::Low, disk: None, noise, snr, psf_sigma, psf_moffat, channel_sigma, rgb_shift, subject_size: frame, spectral, power, optics, planet: None, colour: !img.is_mono(), bands: None, red_spot: None, rings: None };
+    let base = Analysis { kind: ImageKind::Planet, confidence: Confidence::Low, disk: None, noise, snr, psf_sigma, psf_moffat, channel_sigma, rgb_shift, subject_size: frame, spectral, power, optics, planet: None, colour: !img.is_mono(), bands: None, red_spot: None, rings: None, curve_net: None };
 
     // Subject running off the frame edges: a close-up or mosaic of an extended surface.
     let border = border_fraction(&mask, sw, sh);

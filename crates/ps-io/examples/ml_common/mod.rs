@@ -69,6 +69,14 @@ pub fn group_of(stem: &str) -> String {
     if stem.starts_with("IIS_") {
         return "IIS".into();
     }
+    // Globes cut from one Hubble picture (heic2412b_1…_8): the same release, kept together.
+    if let Some((head, tail)) = stem.rsplit_once('_')
+        && (head.starts_with("heic") || head.starts_with("opo"))
+        && !tail.is_empty()
+        && tail.chars().all(|c| c.is_ascii_digit())
+    {
+        return head.to_string();
+    }
     let words: Vec<&str> = stem.split(' ').collect();
     if words.len() >= 2 && words[1].len() == 8 && words[1].chars().filter(|&c| c == '-').count() == 2 {
         return words[1].to_string();
@@ -444,9 +452,12 @@ pub fn subject_of(group: &str) -> &'static str {
         "Moon"
     } else if g.starts_with("sun") || g.starts_with("sdo") {
         "Sun"
-    } else if ["heic1609a", "heic1814c", "opo0322"].iter().any(|m| g.starts_with(m)) {
+    } else if ["heic1609a", "heic1814c", "opo0322", "opo0124", "opo0534", "opo0745", "heic2505", "opo9709", "opo9927"].iter().any(|m| g.starts_with(m)) {
         "Mars"
-    } else if ["heic1917a", "opo2043a", "heic1814b", "pia06193", "heic2312a", "heic2113c", "heic2612a"].iter().any(|s| g.starts_with(s)) {
+    } else if ["heic1917a", "opo2043a", "heic1814b", "pia06193", "heic2312a", "heic2113c", "heic2612a", "heic0904", "opo0115", "opo0323", "opo0418", "opo2305", "opo9828"]
+        .iter()
+        .any(|s| g.starts_with(s))
+    {
         "Saturn"
     } else {
         "Jupiter"

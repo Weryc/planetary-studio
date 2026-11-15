@@ -1055,6 +1055,8 @@ impl PlanetaryStudio {
                     // No subject named: what the pixels suggest (Saturn, Mars, Jupiter).
                     capture.body = capture.body.or(analysis.planet);
                     capture.measure(&image, &analysis);
+                    // The sharpening curve of the subject's network, when there is one for it.
+                    analysis.curve_net = capture.body.and_then(|b| ps_core::curve_net::suggestion(&image, &analysis, b).ok());
                     // A subject and a time to compute from: open the Identifica tab, which sets
                     // itself up (the moons' fit included).
                     if self.prefs.identify_tab_on_open && !keep_settings && capture.body.is_some() && capture.info.time.is_some() {

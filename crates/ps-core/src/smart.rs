@@ -65,6 +65,13 @@ pub struct SmartParams {
     /// models answered; `night` picks one of them instead of the main model's.
     pub learned_nights: Vec<crate::learned::NightCurve>,
     pub night: Option<crate::learned::Night>,
+    /// The shape the subject's network ([`crate::curve_net`]) predicts for this image, used by
+    /// [`SmartCurve::Network`]: (frequency over its peak's, log-gain over the peak's).
+    pub network: Vec<(f32, f32)>,
+    /// The height the network predicts (as a strength) and where its peak falls (cycles/px):
+    /// with the curve chosen, the response's position (`peak`) moves around this frequency.
+    pub network_strength: f32,
+    pub network_cutoff: f32,
 }
 
 /// Shape of the boost across sizes of detail, relative to the cut-off. The default is the one
@@ -83,6 +90,8 @@ pub enum SmartCurve {
     /// wasn't sharp); projects saved with either open with this one.
     #[serde(alias = "LearnedRef")]
     Learned,
+    /// Predicted by the subject's network (Jupiter for now), trained on simulated stacks.
+    Network,
 }
 
 impl SmartCurve {
@@ -96,6 +105,7 @@ impl SmartCurve {
             Self::Surface => tl("Luna e superfici"),
             Self::SmoothGlobe => tl("Globi lisci"),
             Self::Learned => tl("Appresa dai riferimenti"),
+            Self::Network => tl("Rete per il soggetto (nuova)"),
         }
     }
 
@@ -107,6 +117,7 @@ impl SmartCurve {
             Self::Surface => tl("Spinta larga su tutte le dimensioni: crateri piccoli e grandi, montagne, bordi di ombre. Per la Luna e le riprese ravvicinate."),
             Self::SmoothGlobe => tl("Più dolce sul dettaglio finissimo, dove un globo liscio (Saturno, Urano, Venere) mostra solo grana: valorizza bande e divisioni senza macchiettare."),
             Self::Learned => tl("Forma e forza scelte da un piccolo modello che ha imparato da immagini nitide di Hubble, Cassini, SDO e della NASA, riportate a dimensioni amatoriali e viste attraverso un seeing simulato come in uno stack vero: centinaia di fotogrammi con turbolenza, i migliori allineati e sommati. Decide solo le impostazioni: i pixel li calcolano sempre le wavelet."),
+            Self::Network => tl("Curva prevista da una piccola rete addestrata per questo soggetto (per ora Giove) su stack simulati: centinaia di fotogrammi attraverso seeing e sensore, allineati e sommati davvero, confrontati con l'originale nitido. Guarda lo spettro del disco e il rumore nel cielo (se il cielo è stato tagliato a nero lo ignora) e sceglie quanto spingere ogni dimensione di dettaglio. Nitidezza e forma della risposta restano regolabili."),
         }
     }
 
@@ -119,7 +130,7 @@ impl SmartCurve {
             Self::GoodSeeing => &[(0.15, 0.0), (0.25, 0.12), (0.35, 0.22), (0.5, 0.4), (0.7, 0.65), (0.85, 0.85), (1.0, 0.97), (1.15, 1.0), (1.3, 0.9), (1.5, 0.68), (1.7, 0.42), (2.0, 0.15), (2.3, 0.0)],
             Self::Surface => &[(0.07, 0.0), (0.15, 0.22), (0.25, 0.4), (0.35, 0.55), (0.5, 0.72), (0.7, 0.88), (0.85, 0.97), (1.0, 1.0), (1.15, 0.92), (1.3, 0.75), (1.5, 0.45), (1.7, 0.2), (2.0, 0.02), (2.2, 0.0)],
             Self::SmoothGlobe => &[(0.10, 0.0), (0.18, 0.15), (0.25, 0.3), (0.35, 0.48), (0.5, 0.72), (0.7, 0.93), (0.85, 1.0), (1.0, 0.92), (1.15, 0.72), (1.3, 0.48), (1.5, 0.22), (1.7, 0.05), (1.9, 0.0)],
-            Self::Learned => Self::Standard.table(),
+            Self::Learned | Self::Network => Self::Standard.table(),
         }
     }
 }
@@ -152,12 +163,15 @@ impl Default for SmartParams {
             learned_strength: 0.0,
             learned_nights: Vec::new(),
             night: None,
+            network: Vec::new(),
+            network_strength: 0.0,
+            network_cutoff: 0.0,
         }
     }
 }
 
 /// Peak gain at strength 1: BlurXTerminator's typical peak on real stacks (median ×10–12).
-const PEAK_AT_FULL: f32 = 12.0;
+pub const PEAK_AT_FULL: f32 = 12.0;
 /// The strength can go past BlurXTerminator's typical result.
 pub const MAX_STRENGTH: f32 = 2.0;
 
@@ -170,8 +184,20 @@ impl SmartParams {
                 None if self.learned.len() >= 2 => &self.learned,
                 None => SmartCurve::Standard.table(),
             },
+            SmartCurve::Network if self.network.len() >= 2 => &self.network,
             curve => curve.table(),
         }
+    }
+
+    /// Whether the network's curve is the one in use (chosen and present).
+    fn uses_network(&self) -> bool {
+        self.curve == SmartCurve::Network && self.network.len() >= 2 && self.network_cutoff > 0.0
+    }
+
+    /// The frequency the shape is placed by (before the response's position): the network's
+    /// peak with its curve, else the cut-off set from the analysis (0 = measured on the image).
+    pub fn base_cutoff(&self) -> f32 {
+        if self.uses_network() { self.network_cutoff } else { self.cutoff }
     }
 
     fn shape(&self, r: f32) -> f32 {
@@ -193,7 +219,7 @@ impl SmartParams {
 
     /// The learned shape carries its own cleaning of the grain (values below 0 past the peak).
     fn cleans_itself(&self) -> bool {
-        self.curve == SmartCurve::Learned && self.table().iter().any(|q| q.1 < 0.0)
+        matches!(self.curve, SmartCurve::Learned | SmartCurve::Network) && self.table().iter().any(|q| q.1 < 0.0)
     }
 
     /// Where the finest boosted layer should peak, over the cut-off.
@@ -216,7 +242,7 @@ impl SmartParams {
     /// What [`prepare`] depends on (besides the images).
     pub fn prepare_key(&self) -> PrepareKey {
         let learned = self.table().iter().fold(0u64, |h, &(r, v)| h.rotate_left(7) ^ (u64::from(r.to_bits()) << 32 | u64::from(v.to_bits())));
-        PrepareKey { cutoff: self.cutoff.to_bits(), peak: self.peak.to_bits(), curve: self.curve, learned, adaptive: self.adaptive, color: self.color, limb_width: self.limb_width.to_bits() }
+        PrepareKey { cutoff: self.base_cutoff().to_bits(), peak: self.peak.to_bits(), curve: self.curve, learned, adaptive: self.adaptive, color: self.color, limb_width: self.limb_width.to_bits() }
     }
 
     /// The overall response wanted at `f` given what earlier steps did (`done`): never below 1
@@ -260,8 +286,8 @@ fn transform(peak: f32) -> WaveletParams {
 
 /// The cut-off to use: the given one, else measured on the plane, else a typical one.
 fn cutoff_of(p: &SmartParams, plane: &[f32], w: usize, h: usize) -> f32 {
-    if p.cutoff > 0.0 {
-        return p.cutoff.min(0.5);
+    if p.base_cutoff() > 0.0 {
+        return p.base_cutoff().min(0.5);
     }
     crate::spectrum::analyze(plane, w, h, w as f32 / 2.0, h as f32 / 2.0).map_or(0.2, |s| s.cutoff)
 }
