@@ -344,8 +344,8 @@ impl Histogram {
         let painter = ui.painter_at(rect);
         frame(&painter, rect);
         let colors: &[Color32] = match self.channels.len() {
-            3 => &CHANNEL_COLOURS,
-            _ => &[Color32::from_rgba_unmultiplied(210, 214, 222, 150)],
+            3 => &theme::HISTOGRAM_CHANNELS,
+            _ => &[theme::HISTOGRAM_LUMA],
         };
         for (bins, &color) in self.channels.iter().zip(colors) {
             bars(&painter, rect.shrink(4.0), bins, color);
@@ -368,9 +368,9 @@ impl Histogram {
     fn paint(&self, painter: &egui::Painter, inner: Rect, mode: HistogramMode, ghost: Option<&Histogram>, channel: Option<usize>, alpha: f32) {
         let series = |h: &Histogram| -> Vec<(Vec<f32>, Color32)> {
             match (channel.filter(|_| h.counts.len() == 3), mode, h.counts.len()) {
-                (Some(c), _, _) => vec![(h.counts[c].clone(), CHANNEL_COLOURS[c])],
-                (None, HistogramMode::Rgb, 3) => h.counts.iter().cloned().zip(CHANNEL_COLOURS).collect(),
-                _ => vec![(h.luma.clone(), Color32::from_rgba_unmultiplied(215, 218, 226, 170))],
+                (Some(c), _, _) => vec![(h.counts[c].clone(), theme::HISTOGRAM_CHANNELS[c])],
+                (None, HistogramMode::Rgb, 3) => h.counts.iter().cloned().zip(theme::HISTOGRAM_CHANNELS).collect(),
+                _ => vec![(h.luma.clone(), theme::HISTOGRAM_LUMA)],
             }
         };
         let now = series(self);
@@ -408,11 +408,6 @@ pub struct Backdrop<'a> {
     pub channel: Option<usize>,
 }
 
-const CHANNEL_COLOURS: [Color32; 3] = [
-    Color32::from_rgba_premultiplied(160, 60, 60, 160),
-    Color32::from_rgba_premultiplied(70, 150, 85, 160),
-    Color32::from_rgba_premultiplied(60, 95, 170, 160),
-];
 
 fn frame(painter: &egui::Painter, rect: Rect) {
     painter.rect_filled(rect, CornerRadius::same(theme::RADIUS), BG);

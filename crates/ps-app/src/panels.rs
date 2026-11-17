@@ -328,7 +328,7 @@ pub fn area_tabs(ui: &mut Ui, areas: &[(Group, usize)], current: &mut Group) {
             let selected = *group == *current;
             let painter = ui.painter_at(rect);
             let fill = if selected { theme::SURFACE } else if response.hovered() { theme::SURFACE_HOVER } else { theme::PANEL };
-            painter.rect_filled(rect, CornerRadius::same(6), fill);
+            painter.rect_filled(rect, CornerRadius::same(theme::radius::M), fill);
             if selected {
                 painter.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left() + 8.0, rect.bottom() - 3.0), egui::pos2(rect.right() - 8.0, rect.bottom())), CornerRadius::same(2), ACCENT);
             }
@@ -460,7 +460,7 @@ fn card(
         // Set apart from the cards above, and says where it sits: on top of everything above it.
         ui.add_space(theme::space::L);
         ui.horizontal(|ui| {
-            ui.add_space(14.0);
+            ui.add_space(theme::space::L);
             ui.label(ICON_SOUTH.rich_text().size(theme::size::ICON_SMALL).color(ACCENT_DIM));
             ui.label(RichText::new(tl("riceve il risultato delle schede sopra")).size(theme::size::SMALL).color(TEXT_WEAK));
         });
@@ -658,8 +658,8 @@ pub fn align_body(ui: &mut Ui, p: &mut AlignParams, mono: bool) {
         });
     });
     ui.add_space(theme::space::XS);
-    let red = Color32::from_rgb(235, 100, 100);
-    let blue = Color32::from_rgb(110, 150, 245);
+    let red = theme::CHANNEL_R;
+    let blue = theme::CHANNEL_B;
     for (name, color, shift) in [(tl("Rosso"), red, &mut p.red), (tl("Blu"), blue, &mut p.blue)] {
         ui.label(RichText::new(name).size(theme::size::SMALL).strong().color(color));
         ParamSlider::new(tl("Orizzontale"), &mut shift[0], -8.0..=8.0, 0.0).suffix(" px").show(ui);
@@ -866,7 +866,7 @@ fn deconvolution_advanced(ui: &mut Ui, p: &mut DeconvParams, auto: &DeconvParams
         preview.show(ui, &kernel, 76.0);
         ui.vertical(|ui| {
             ui.label(RichText::new("FWHM").size(theme::size::SMALL).color(TEXT_WEAK));
-            ui.label(RichText::new(format!("{:.2} px", p.psf.fwhm_px())).size(17.0).color(TEXT));
+            ui.label(RichText::new(format!("{:.2} px", p.psf.fwhm_px())).size(theme::size::VALUE).color(TEXT));
             ui.label(RichText::new(format!("kernel {0}×{0}", kernel.size())).size(theme::size::SMALL).color(TEXT_WEAK));
         });
     });
@@ -987,7 +987,7 @@ impl PsfPreview {
         }
         let texture = self.texture.as_ref().unwrap();
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
-        ui.painter().rect_filled(rect, CornerRadius::same(6), Color32::BLACK);
+        ui.painter().rect_filled(rect, CornerRadius::same(theme::radius::M), Color32::BLACK);
         // Show at most ±12 px around the centre so small PSFs stay legible.
         let size = texture.size()[0] as f32;
         let visible = size.min(25.0) / size;
@@ -1668,7 +1668,7 @@ pub fn suncolor_body(ui: &mut Ui, p: &mut ps_core::suncolor::SunColorParams, sun
                 let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::click());
                 let painter = ui.painter_at(rect);
                 let selected = p.palette == palette;
-                painter.rect_filled(rect, CornerRadius::same(6), if selected { theme::SURFACE } else if response.hovered() { theme::SURFACE_HOVER } else { theme::PANEL });
+                painter.rect_filled(rect, CornerRadius::same(theme::radius::M), if selected { theme::SURFACE } else if response.hovered() { theme::SURFACE_HOVER } else { theme::PANEL });
                 // The ramp from black to white through the palette's colours.
                 let bar = egui::Rect::from_min_max(rect.min + Vec2::new(8.0, 7.0), egui::pos2(rect.right() - 8.0, rect.top() + 19.0));
                 let steps = 48;
@@ -1680,7 +1680,7 @@ pub fn suncolor_body(ui: &mut Ui, p: &mut ps_core::suncolor::SunColorParams, sun
                     painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, bar.top()), egui::pos2(x1, bar.bottom())), CornerRadius::ZERO, colour);
                 }
                 if selected {
-                    painter.rect_stroke(rect, CornerRadius::same(6), egui::Stroke::new(1.5, ACCENT), egui::StrokeKind::Inside);
+                    painter.rect_stroke(rect, CornerRadius::same(theme::radius::M), egui::Stroke::new(1.5, ACCENT), egui::StrokeKind::Inside);
                 }
                 painter.text(egui::pos2(rect.left() + 8.0, rect.bottom() - 10.0), egui::Align2::LEFT_CENTER, palette.label(), egui::FontId::proportional(theme::size::SMALL), if selected { TEXT } else { TEXT_WEAK });
                 if response.on_hover_text(palette.description()).clicked() {
@@ -1903,9 +1903,9 @@ fn annotation_row(ui: &mut Ui, on: &mut bool, actions: &mut Vec<PanelAction>) {
             ui.label(ICON_DRAG_INDICATOR.rich_text().size(theme::size::ICON).color(Color32::TRANSPARENT));
             toggle(ui, on).on_hover_text(tl("Accesa: spegni (toglie il testo dall'immagine)"));
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
-            ui.painter().rect_filled(rect, CornerRadius::same(4), BG);
+            ui.painter().rect_filled(rect, CornerRadius::same(theme::radius::S), BG);
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, ICON_EDIT_NOTE.codepoint, egui::FontId::proportional(18.0), ACCENT);
-            ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(rect, CornerRadius::same(theme::radius::S), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.add(egui::Label::new(RichText::new(tl("Annotazione")).strong().color(TEXT)).selectable(false));
@@ -2008,7 +2008,7 @@ fn thumbnail(ui: &mut Ui, layer: &Layer, thumbs: &HashMap<u64, MaskThumbView>) {
     let side = 30.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(4), BG);
+    painter.rect_filled(rect, CornerRadius::same(theme::radius::S), BG);
     match thumbs.get(&layer.id) {
         Some(t) => {
             let size = t.texture.size_vec2();
@@ -2019,7 +2019,7 @@ fn thumbnail(ui: &mut Ui, layer: &Layer, thumbs: &HashMap<u64, MaskThumbView>) {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, shape_icon(&layer.mask.shape).codepoint, egui::FontId::proportional(18.0), TEXT_WEAK);
         }
     }
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+    ui.painter().rect_stroke(rect, CornerRadius::same(theme::radius::S), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
 }
 
 /// "Aggiungi maschera": first the ones made for this subject, then automatic regions and shapes.
@@ -2506,7 +2506,7 @@ pub fn tone_body(ui: &mut Ui, p: &mut ToneParams, parts: ToneParts, layer: Optio
             });
         });
         let (points, colour) = match channel {
-            Some(c) => (&mut p.current.channel_curves[c], [Color32::from_rgb(235, 100, 100), Color32::from_rgb(110, 210, 125), Color32::from_rgb(110, 150, 245)][c]),
+            Some(c) => (&mut p.current.channel_curves[c], [theme::CHANNEL_R, theme::CHANNEL_G, theme::CHANNEL_B][c]),
             None => (&mut p.current.curve, ACCENT),
         };
         // With the levels above, their histogram is enough.

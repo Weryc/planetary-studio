@@ -447,7 +447,7 @@ impl IdentifyState {
         for (k, pick) in self.picks.iter().enumerate() {
             if let Some((x, y)) = pick.pixel {
                 let at = to_screen(Pos2::new(x as f32 + 0.5, y as f32 + 0.5));
-                let colour = Color32::from_rgb(255, 120, 200);
+                let colour = theme::MARK;
                 painter.circle_stroke(at, 8.0, Stroke::new(2.0, colour));
                 painter.text(at + egui::vec2(11.0, -9.0), egui::Align2::LEFT_BOTTOM, format!("{} {}", k + 1, pick.name.unwrap_or("")), egui::FontId::proportional(13.0), colour);
             }
@@ -589,7 +589,7 @@ impl IdentifyState {
             ui.add_space(theme::space::XS);
             for k in 0..2 {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{}", k + 1)).strong().color(Color32::from_rgb(255, 120, 200)));
+                    ui.label(RichText::new(format!("{}", k + 1)).strong().color(theme::MARK));
                     let pick = &mut self.picks[k];
                     egui::ComboBox::from_id_salt(("place-crater", k)).width(130.0).selected_text(pick.name.unwrap_or(tl("Cratere…"))).show_ui(ui, |ui| {
                         for n in &list {

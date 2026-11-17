@@ -15,6 +15,23 @@ pub const SUCCESS: Color32 = Color32::from_rgb(110, 196, 140);
 pub const WARNING: Color32 = Color32::from_rgb(230, 190, 90);
 pub const DANGER: Color32 = Color32::from_rgb(230, 105, 95);
 
+/// Marks drawn over the image (picked points, selections, the brush) and the colour channels:
+/// data colours, not interface chrome, so they stay bright against any image.
+pub const MARK: Color32 = Color32::from_rgb(255, 120, 200);
+pub const SELECTION: Color32 = Color32::from_rgb(255, 110, 90);
+pub const BRUSH_ADD: Color32 = Color32::from_rgb(90, 230, 140);
+pub const BRUSH_ERASE: Color32 = Color32::from_rgb(255, 90, 80);
+pub const CHANNEL_R: Color32 = Color32::from_rgb(235, 100, 100);
+pub const CHANNEL_G: Color32 = Color32::from_rgb(110, 210, 125);
+pub const CHANNEL_B: Color32 = Color32::from_rgb(110, 150, 245);
+/// Histogram fills (premultiplied alpha): the three channels, then luminance.
+pub const HISTOGRAM_CHANNELS: [Color32; 3] = [
+    Color32::from_rgba_premultiplied(160, 60, 60, 160),
+    Color32::from_rgba_premultiplied(70, 150, 85, 160),
+    Color32::from_rgba_premultiplied(60, 95, 170, 160),
+];
+pub const HISTOGRAM_LUMA: Color32 = Color32::from_rgba_premultiplied(133, 136, 141, 160);
+
 pub const RADIUS: u8 = radius::M;
 
 /// Corner radii (points). Pills (radius = half their height) and hand-drawn shapes keep their own.
@@ -51,6 +68,11 @@ pub mod size {
     pub const BODY: f32 = 13.0;
     /// Hints, section labels, units.
     pub const SMALL: f32 = 11.0;
+    /// Large readouts (a measured value) and the title of an empty view.
+    pub const VALUE: f32 = 17.0;
+    pub const LEAD: f32 = 19.0;
+    /// The large icon of an empty view.
+    pub const SPLASH: f32 = 72.0;
     /// Small icons: in segmented controls, beside hints and status lines.
     pub const ICON_SMALL: f32 = 14.0;
     /// Icons next to body text.

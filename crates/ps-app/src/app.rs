@@ -1780,7 +1780,7 @@ impl PlanetaryStudio {
     fn top_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.label(ICON_PLANET.rich_text().size(theme::size::ICON).color(ACCENT));
-            ui.add_space(4.0);
+            ui.add_space(theme::space::S);
             ui.menu_button("File", |ui| {
                 let io_free = self.io_busy.is_none();
                 if ui.add_enabled(io_free, egui::Button::new((ICON_FOLDER_OPEN.rich_text(), tl("Apri…"))).shortcut_text(ctx.format_shortcut(&OPEN))).clicked() {
@@ -2046,7 +2046,7 @@ impl PlanetaryStudio {
     fn side_panel(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::Panel::bottom("histogram").frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 10))).show(ui, |ui| {
             ui.label(caps(tl("ISTOGRAMMA")));
-            ui.add_space(4.0);
+            ui.add_space(theme::space::S);
             match &self.histogram {
                 Some(h) => h.show(ui),
                 None => Histogram::default().show(ui),
@@ -2222,7 +2222,7 @@ impl PlanetaryStudio {
                     }
                 }
             }
-            ui.add_space(12.0);
+            ui.add_space(theme::space::L);
         });
         if self.pipeline.wavelet.params.scale_mode != scales_before {
             self.switch_scales(scales_before);
@@ -2233,24 +2233,24 @@ impl PlanetaryStudio {
     fn empty_state(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.5 - 120.0).max(20.0));
-            ui.label(ICON_PLANET.rich_text().size(72.0).color(theme::ACCENT_DIM));
-            ui.add_space(10.0);
-            ui.label(RichText::new(tl("Apri un'immagine planetaria, lunare o solare")).size(19.0).color(TEXT));
-            ui.add_space(2.0);
+            ui.label(ICON_PLANET.rich_text().size(theme::size::SPLASH).color(theme::ACCENT_DIM));
+            ui.add_space(theme::space::M);
+            ui.label(RichText::new(tl("Apri un'immagine planetaria, lunare o solare")).size(theme::size::LEAD).color(TEXT));
+            ui.add_space(theme::space::XS);
             ui.label(RichText::new(tl("Il tipo viene riconosciuto e le impostazioni scelte automaticamente")).color(TEXT_WEAK));
-            ui.add_space(16.0);
+            ui.add_space(theme::space::L);
             let open = primary_button(Some(ICON_FOLDER_OPEN), tl("Apri immagine…")).min_size(egui::vec2(180.0, 36.0));
             if ui.add(open).clicked() {
                 self.open_dialog(ctx);
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::space::M);
             ui.label(RichText::new(tl("oppure trascinala qui · TIFF, FITS, PNG, JPEG")).small().color(TEXT_WEAK));
-            ui.add_space(10.0);
+            ui.add_space(theme::space::M);
             if ui.add(egui::Button::new((ICON_GRID_VIEW.rich_text(), tl("Unisci più immagini in un mosaico…"))).frame(false)).on_hover_text(tl("Oppure trascina qui più immagini insieme")).clicked() {
                 self.new_mosaic_dialog(ctx);
             }
             if !self.status.is_empty() {
-                ui.add_space(12.0);
+                ui.add_space(theme::space::L);
                 ui.label(RichText::new(&self.status).small().color(TEXT_WEAK));
             }
         });

@@ -2,26 +2,27 @@
 //! once the pointer is released.
 
 use ps_core::pipeline::Pipeline;
+use std::collections::VecDeque;
 
 const LIMIT: usize = 200;
 
 pub struct History {
-    undo: Vec<Pipeline>,
+    undo: VecDeque<Pipeline>,
     redo: Vec<Pipeline>,
     committed: Pipeline,
 }
 
 impl History {
     pub fn new(pipeline: &Pipeline) -> Self {
-        Self { undo: Vec::new(), redo: Vec::new(), committed: pipeline.clone() }
+        Self { undo: VecDeque::new(), redo: Vec::new(), committed: pipeline.clone() }
     }
 
     /// Call every frame.
     pub fn track(&mut self, current: &Pipeline, interacting: bool) {
         if !interacting && *current != self.committed {
-            self.undo.push(std::mem::replace(&mut self.committed, current.clone()));
+            self.undo.push_back(std::mem::replace(&mut self.committed, current.clone()));
             if self.undo.len() > LIMIT {
-                self.undo.remove(0);
+                self.undo.pop_front();
             }
             self.redo.clear();
         }
@@ -36,7 +37,7 @@ impl History {
     }
 
     pub fn undo(&mut self, current: &mut Pipeline) {
-        if let Some(prev) = self.undo.pop() {
+        if let Some(prev) = self.undo.pop_back() {
             self.redo.push(std::mem::replace(&mut self.committed, prev.clone()));
             *current = prev;
         }
@@ -44,7 +45,7 @@ impl History {
 
     pub fn redo(&mut self, current: &mut Pipeline) {
         if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.committed, next.clone()));
+            self.undo.push_back(std::mem::replace(&mut self.committed, next.clone()));
             *current = next;
         }
     }

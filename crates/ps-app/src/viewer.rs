@@ -592,7 +592,7 @@ impl Viewer {
         }
 
         if let Some((r, kind)) = self.shape {
-            let stroke = Stroke::new(1.5, Color32::from_rgb(255, 110, 90));
+            let stroke = Stroke::new(1.5, theme::SELECTION);
             match kind {
                 ShapeKind::Rectangle => {
                     painter.rect_stroke(self.rect_to_screen(canvas, r), 0.0, stroke, StrokeKind::Middle);
@@ -632,7 +632,7 @@ impl Viewer {
         }
 
         if let Some(b) = brush.filter(|_| tool == Tool::Brush) {
-            let colour = if b.erase { Color32::from_rgb(255, 90, 80) } else { Color32::from_rgb(90, 230, 140) };
+            let colour = if b.erase { theme::BRUSH_ERASE } else { theme::BRUSH_ADD };
             let r = b.radius * self.zoom;
             if !self.painting.is_empty() {
                 let points: Vec<Pos2> = self.painting.iter().map(|p| self.to_screen(canvas, pos2(p[0], p[1]))).collect();
@@ -730,7 +730,7 @@ fn corner_handles(painter: &egui::Painter, rect: Rect, color: Color32) {
 fn pill(painter: &egui::Painter, pos: Pos2, text: &str, fill: Color32, text_color: Color32) {
     let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(11.0), text_color);
     let rect = Rect::from_min_size(pos, galley.size() + Vec2::new(12.0, 6.0));
-    painter.rect_filled(rect, CornerRadius::same(4), fill);
+    painter.rect_filled(rect, CornerRadius::same(theme::radius::S), fill);
     painter.galley(rect.min + Vec2::new(6.0, 3.0), galley, text_color);
 }
 

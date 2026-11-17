@@ -439,7 +439,7 @@ impl SettingsWindow {
                     }
                 });
             });
-            ui.add_space(10.0);
+            ui.add_space(theme::space::M);
             // Taller than small windows: scroll, keeping the title in view.
             let max_height = (ctx.content_rect().height() - 140.0).max(200.0);
             egui::ScrollArea::vertical().max_height(max_height).min_scrolled_height(max_height.min(720.0)).auto_shrink([false, true]).show(ui, |ui| {
@@ -448,11 +448,11 @@ impl SettingsWindow {
                 if crate::widgets::segmented(ui, &mut prefs.language, &[(Lang::It, None, Lang::It.native_name()), (Lang::En, None, Lang::En.native_name())]) {
                     ps_core::i18n::set_lang(prefs.language);
                 }
-                ui.add_space(14.0);
+                ui.add_space(theme::space::L);
                 self.modules_section(ui, prefs);
-                ui.add_space(14.0);
+                ui.add_space(theme::space::L);
                 self.bxt_section(ui, prefs);
-                ui.add_space(14.0);
+                ui.add_space(theme::space::L);
                 section(ui, tl("APERTURA DELLE IMMAGINI"));
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.auto_structure);
@@ -470,7 +470,7 @@ impl SettingsWindow {
                     toggle(ui, &mut prefs.identify_tab_on_open);
                     ui.label(tl("Apri subito la scheda «Identifica e annota» se conosco oggetto e data"));
                 });
-                ui.add_space(14.0);
+                ui.add_space(theme::space::L);
                 section(ui, tl("PRESTAZIONI"));
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.use_gpu);
@@ -499,7 +499,7 @@ impl SettingsWindow {
                     ui.label(tl("Risparmia memoria"));
                 });
                 note(ui, tl("Tiene in memoria solo i passi lenti (deconvoluzione, rumore, wavelet…) e ricalcola quelli rapidi. Utile con immagini grandi e poca RAM."));
-                ui.add_space(14.0);
+                ui.add_space(theme::space::L);
                 section(ui, tl("PANNELLO"));
                 ui.horizontal(|ui| {
                     toggle(ui, &mut prefs.one_group_open);
@@ -515,7 +515,7 @@ impl SettingsWindow {
     fn modules_section(&mut self, ui: &mut egui::Ui, prefs: &mut Preferences) {
         section(ui, tl("MODULI DEL PANNELLO"));
         ui.label(RichText::new(tl("I preferiti stanno in cima; i moduli nascosti non vengono né mostrati né applicati.")).small().color(TEXT_WEAK));
-        ui.add_space(6.0);
+        ui.add_space(theme::space::M);
         let stages: Vec<Stage> = prefs.modules.iter().map(|m| m.stage).collect();
         ui.spacing_mut().item_spacing.y = 4.0;
         for stage in stages {
@@ -551,7 +551,7 @@ impl SettingsWindow {
                 .small()
                 .color(TEXT_WEAK),
         );
-        ui.add_space(6.0);
+        ui.add_space(theme::space::M);
         ui.horizontal(|ui| {
             let path = prefs.bxt_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| tl("non trovato").into());
             ui.label(RichText::new(tl("Eseguibile")).color(TEXT_WEAK));
@@ -602,7 +602,7 @@ impl SettingsWindow {
 
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.label(caps(title));
-    ui.add_space(4.0);
+    ui.add_space(theme::space::S);
 }
 
 fn first_lines(text: &str) -> String {
