@@ -6,12 +6,14 @@
 //! user correct the subject, the time and the orientation, and every change searches again. The
 //! local time zone (daylight saving included, for the capture's own date) comes from the system;
 //! for Jupiter and Saturn the time, turn and moons' distances are fitted to the moons found in
-//! the picture as soon as it is open. The names can be printed onto the exported image
+//! the picture as soon as it is open (and the image straightened, if asked). The «Annotazione»
+//! card says what is shown over the image and, with its switch, prints it onto the picture
 //! ([`crate::annotate`]).
 
 use ps_core::i18n::tl;
 use ps_core::tr;
 use crate::annotate::{Corner, LabelOptions, Plan, Tint};
+use crate::datetime::{civil_from_days, date_picker, days_from_civil, time_field};
 use crate::panels::PanelAction;
 use crate::theme::{self, ACCENT, TEXT, TEXT_WEAK};
 use crate::widgets::{ParamSlider, caps, icon_button, note, segmented, toggle};
@@ -53,17 +55,17 @@ struct Fitting {
 }
 
 pub struct IdentifyState {
-    /// The tab's two sections, folded or not: finding the object and its orientation, and
-    /// writing on the image.
+    /// The tab's two cards, folded or not: finding the object and its orientation, and what is
+    /// shown and written on the image.
     pub identify_collapsed: bool,
     pub annotate_collapsed: bool,
-    /// The names and caption are written on the image (a layer among the masks).
+    /// The names and caption are written on the image (a layer among the masks); otherwise the
+    /// names are only drawn over it on screen.
     pub annotate: bool,
     /// The top-bar button: identify the subject and show the names on the image.
     pub active: bool,
     /// The search runs and the names show: the button is on or the tab is the one showing.
     pub open: bool,
-    pub show_labels: bool,
     /// Date shown and typed in universal time (otherwise in local time, `offset_min` from UT).
     pub utc: bool,
     /// The zone follows the system and the date; off = the hours typed by hand.
@@ -78,12 +80,7 @@ pub struct IdentifyState {
     fitted_path: Option<std::path::PathBuf>,
     /// The orientation came from the fit on the moons.
     fit_applied: bool,
-    /// The top-bar button was switched on: fit time and orientation to the moons as soon as the
-    /// first answer is in, as if «Regola sulle lune» had been pressed.
-    fit_requested: bool,
-    /// «Regola sulle lune» also turns and stretches (otherwise only the time moves), and then
-    /// straightens the image to north up.
-    fit_orientation: bool,
+    /// After the fit on the moons, turn the image north up.
     fit_upright: bool,
     /// The fit asked to straighten: taken by the app, which turns the image.
     upright_pending: Option<(bool, f32)>,
@@ -109,7 +106,7 @@ pub struct IdentifyState {
 
 impl Default for IdentifyState {
     fn default() -> Self {
-        Self { identify_collapsed: false, annotate_collapsed: true, annotate: false, active: false, open: false, show_labels: true, utc: true, zone_auto: true, offset_min: 0, zone_cache: None, zone_pending: None, fitted_path: None, fit_applied: false, fit_requested: false, fit_orientation: true, fit_upright: false, upright_pending: None, body: None, time: None, manual: None, picks: [PlacePick::default(); 2], placed: None, place_error: None, awaiting: None, place_mirror: false, result: None, pending: None, fitting: None, fit_note: None, image_path: None }
+        Self { identify_collapsed: false, annotate_collapsed: false, annotate: false, active: false, open: false, utc: true, zone_auto: true, offset_min: 0, zone_cache: None, zone_pending: None, fitted_path: None, fit_applied: false, fit_upright: true, upright_pending: None, body: None, time: None, manual: None, picks: [PlacePick::default(); 2], placed: None, place_error: None, awaiting: None, place_mirror: false, result: None, pending: None, fitting: None, fit_note: None, image_path: None }
     }
 }
 
@@ -155,38 +152,10 @@ fn system_zone(ut: Moment) -> (i32, bool) {
     (offset, offset > at(1).min(at(7)))
 }
 
-/// A reminder when nothing but the names would be printed.
-fn hint_if_empty(ui: &mut Ui, opt: &LabelOptions) {
-    if opt.title.is_empty() && opt.author.is_empty() && opt.location.is_empty() && opt.note.is_empty() {
-        note(ui, tl("Titolo, autore, luogo e nota restano fuori finché sono vuoti."));
-    }
-}
-
 /// "UTC+2".
 fn zone_name(offset_min: i32) -> String {
     let (sign, m) = (if offset_min < 0 { '-' } else { '+' }, offset_min.abs());
     if m % 60 == 0 { format!("UTC{sign}{}", m / 60) } else { format!("UTC{sign}{}:{:02}", m / 60, m % 60) }
-}
-
-fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
-    let y = i64::from(y) - i64::from(m <= 2);
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (i64::from(m) + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
-    era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
-}
-
-fn civil_from_days(z: i64) -> (i32, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    ((yoe + era * 400 + i64::from(m <= 2)) as i32, m, d)
 }
 
 /// `m` moved by `minutes` (calendar-aware).
@@ -264,11 +233,10 @@ impl IdentifyState {
         }
     }
 
-    /// The top-bar button switched on: names on the image, and the time and orientation fitted
-    /// to the moons as soon as the first answer is in.
+    /// The top-bar button switched on: names on the image; the time and orientation are fitted
+    /// to the moons as soon as the first answer is in (once per picture).
     pub fn switch_on(&mut self) {
         self.active = true;
-        self.fit_requested = true;
     }
 
     /// Test helper: pick the subject as the user would in the tab.
@@ -332,7 +300,8 @@ impl IdentifyState {
             let (automatic, start, upright) = (fitting.automatic, fitting.start, fitting.upright);
             self.fitting = None;
             self.fit_note = Some(match fit {
-                Some(f) if automatic && f.matched < 2 => tr!("Troppo poche lune su un punto luminoso ({} su {}) per regolare da sola: premi «Regola sulle lune» se vuoi provare.", "Too few moons land on a bright spot ({} of {}) to adjust automatically: press “Fit to moons” if you want to try.", f.matched, f.total),
+                // By itself it only acts when the moons agree: all of them, or at least two.
+                Some(f) if automatic && f.matched < 2.min(f.total) => tr!("Solo {} lune su {} cadono su un punto luminoso: regola a mano o ricalcola.", "Only {} of {} moons land on a bright spot: adjust by hand or fit again.", f.matched, f.total),
                 Some(f) => {
                     self.time = Some(f.when);
                     self.manual = Some(f.orientation);
@@ -344,13 +313,7 @@ impl IdentifyState {
                         }
                     }
                     let turn = ((f.orientation.angle - start.angle + 180.0).rem_euclid(360.0)) - 180.0;
-                    tr!("Regolato su tutte le lune insieme: {} su {} cadono su un punto luminoso (ora {:+.1} min, rotazione {:+.1}°, distanze {:+.1} %).", "Fitted to all the moons together: {} of {} land on a bright spot (time {:+.1} min, rotation {:+.1}°, distances {:+.1} %).",
-                        f.matched,
-                        f.total,
-                        f.shift_min,
-                        turn,
-                        (f.orientation.scale / start.scale - 1.0) * 100.0
-                    )
+                    tr!("{} lune su {} sui punti luminosi · ora {:+.1} min · rotazione {:+.1}°", "{} of {} moons on bright spots · time {:+.1} min · rotation {:+.1}°", f.matched, f.total, f.shift_min, turn)
                 }
                 None => tl("Non trovo punti luminosi da far combaciare con le lune.").to_string(),
             });
@@ -370,23 +333,6 @@ impl IdentifyState {
             self.pending = Some((key, rx));
             return;
         }
-        // Switched on from the top bar: fit time and orientation to the moons, as the button would.
-        if self.fit_requested
-            && self.fitting.is_none()
-            && self.pending.is_none()
-            && let Some((k, id)) = &self.result
-            && *k == key
-        {
-            self.fit_requested = false;
-            if matches!(key.body, Body::Jupiter | Body::Saturn)
-                && let Some(or) = id.orientation
-                && id.labels.iter().any(|l| matches!(l.kind, LabelKind::MoonFound | LabelKind::MoonPredicted))
-            {
-                self.fitted_path = Some(input.path.to_path_buf());
-                self.start_fit(ctx, input.source, key.body, key.when, or, false);
-                return;
-            }
-        }
         // The first answer for a new picture of a planet: fit time, turn and distances to the
         // moons at once, without being asked.
         if self.fitting.is_none()
@@ -405,13 +351,20 @@ impl IdentifyState {
         }
     }
 
+    /// Back to the automatic way: the file's time and the orientation found, then the fit on the
+    /// moons again.
+    fn refit_automatically(&mut self) {
+        self.time = None;
+        self.orientation_reset();
+        self.fitted_path = None;
+    }
+
     fn start_fit(&mut self, ctx: &egui::Context, image: &Arc<Image>, body: Body, when: Moment, or: Orientation, automatic: bool) {
         let (tx, rx) = channel();
         let (image, ctx) = (Arc::clone(image), ctx.clone());
-        let free = self.fit_orientation || automatic;
-        let upright = self.fit_upright && !automatic;
+        let upright = self.fit_upright;
         std::thread::spawn(move || {
-            tx.send(ps_core::identify::fit_time_with(&image, body, &when, or, 180.0, free)).ok();
+            tx.send(ps_core::identify::fit_time_with(&image, body, &when, or, 180.0, true)).ok();
             ctx.request_repaint();
         });
         self.fitting = Some(Fitting { automatic, upright, start: or, rx });
@@ -478,10 +431,11 @@ impl IdentifyState {
         Some(Plan { heading, labels: id.labels.clone(), from: (input.source.width(), input.source.height()), caption, north: id.orientation.map(Orientation::north_up_angle) })
     }
 
-    /// The names over the image. `to_screen` maps image pixels to the screen; `zoom` is screen
-    /// pixels per image pixel.
+    /// The names over the image, as the «Annotazione» card says (colour, which moons, circles).
+    /// Once they are printed onto the picture (the card's switch) they are not drawn twice.
+    /// `to_screen` maps image pixels to the screen; `zoom` is screen pixels per image pixel.
     pub fn paint(&self, painter: &egui::Painter, to_screen: impl Fn(Pos2) -> Pos2, zoom: f32, opt: &LabelOptions) {
-        if !self.open || !self.show_labels {
+        if !self.open {
             return;
         }
         let Some((_, id)) = &self.result else { return };
@@ -493,6 +447,10 @@ impl IdentifyState {
                 painter.text(at + egui::vec2(11.0, -9.0), egui::Align2::LEFT_BOTTOM, format!("{} {}", k + 1, pick.name.unwrap_or("")), egui::FontId::proportional(13.0), colour);
             }
         }
+        if self.annotate {
+            return;
+        }
+        let base = Color32::from_rgb((opt.colour[0] * 255.0) as u8, (opt.colour[1] * 255.0) as u8, (opt.colour[2] * 255.0) as u8);
         let font = egui::FontId::proportional(13.0);
         let shadow = Color32::from_black_alpha(200);
         let text = |at: Pos2, s: &str, colour: Color32, anchor: egui::Align2| {
@@ -506,12 +464,15 @@ impl IdentifyState {
             match l.kind {
                 LabelKind::MoonFound | LabelKind::MoonPredicted => {
                     let found = l.kind == LabelKind::MoonFound;
-                    let colour = if found { Color32::from_rgb(120, 230, 140) } else { Color32::from_rgb(255, 190, 90) };
-                    let r = (6.0 * zoom).clamp(7.0, 18.0);
-                    if found {
+                    if (found && !opt.moons) || (!found && !opt.predicted) {
+                        continue;
+                    }
+                    // A moon only predicted is dimmer, and its ring dashed.
+                    let colour = if found { base } else { base.gamma_multiply(0.7) };
+                    let r = if opt.circles { (6.0 * zoom).clamp(7.0, 18.0) } else { 0.0 };
+                    if opt.circles && found {
                         painter.circle_stroke(at, r, Stroke::new(1.5, colour));
-                    } else {
-                        // Dashed: where it should be.
+                    } else if opt.circles {
                         for k in 0..12 {
                             let a0 = k as f32 / 12.0 * std::f32::consts::TAU;
                             let a1 = a0 + std::f32::consts::TAU / 24.0;
@@ -524,45 +485,32 @@ impl IdentifyState {
                     if !opt.craters {
                         continue;
                     }
-                    let colour = if l.on_terminator { Color32::from_rgb(255, 225, 120) } else { Color32::from_rgb(235, 235, 235) };
                     let r = l.radius * zoom;
                     if r > 6.0 {
-                        painter.circle_stroke(at, r, Stroke::new(1.0, colour.gamma_multiply(0.6)));
+                        painter.circle_stroke(at, r, Stroke::new(1.0, base.gamma_multiply(0.6)));
                     }
                     if r > 3.0 || zoom >= 0.5 {
-                        text(at, &l.name, colour, egui::Align2::CENTER_CENTER);
+                        text(at, &l.name, base, egui::Align2::CENTER_CENTER);
                     }
                 }
                 LabelKind::Mare | LabelKind::Feature => {
                     if (l.kind == LabelKind::Mare && !opt.seas) || (l.kind == LabelKind::Feature && !opt.craters) {
                         continue;
                     }
-                    let colour = Color32::from_rgb(140, 200, 255);
-                    text(at, &l.name, colour, egui::Align2::CENTER_CENTER);
+                    text(at, &l.name, base, egui::Align2::CENTER_CENTER);
                 }
             }
         }
     }
 
-    /// The names and the caption written on the image, live, as a layer among the masks.
-    fn annotate_part(&mut self, ui: &mut Ui, opt: &mut LabelOptions) {
-        let section = |ui: &mut Ui, title: &str| {
-            ui.add_space(theme::space::L);
-            ui.label(caps(title));
-            ui.add_space(theme::space::XS);
-        };
-        ui.add_space(theme::space::M);
-        ui.horizontal(|ui| {
-            toggle(ui, &mut self.annotate);
-            ui.label(RichText::new(tl("Annota l'immagine")).strong().color(TEXT));
-        });
-        note(ui, if self.annotate { tl("Il testo è sull'immagine e si aggiorna mentre cambi le opzioni. Lo trovi tra le maschere come «Annotazione»: l'esportazione normale lo include.") } else { tl("Accendi per scrivere nomi e didascalia sull'immagine: compaiono subito e diventano una maschera «Annotazione».") });
+    /// What is shown over the image (names, circles, colour) and, behind the card's switch, what
+    /// is printed onto it: a title and a caption. `on`: the switch is on.
+    fn annotate_part(&mut self, ui: &mut Ui, opt: &mut LabelOptions, on: bool) {
         let Some((key, _)) = &self.result else {
-            note(ui, tl("Prima scegli l'oggetto e la data nella scheda Identificazione."));
+            note(ui, tl("Scegli l'oggetto e la data nella scheda Identificazione."));
             return;
         };
-        let key = *key;
-        section(ui, tl("NOMI SULL'IMMAGINE"));
+        let body = key.body;
         // Switches in two columns.
         let switches = |ui: &mut Ui, id: &str, items: Vec<(&mut bool, &str)>| {
             egui::Grid::new(id).num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
@@ -577,77 +525,62 @@ impl IdentifyState {
                 }
             });
         };
-        if matches!(key.body, Body::Jupiter | Body::Saturn) {
-            switches(ui, "names-moons", vec![(&mut opt.moons, tl("Lune trovate")), (&mut opt.predicted, tl("Anche solo previste")), (&mut opt.circles, tl("Cerchi"))]);
+        if matches!(body, Body::Jupiter | Body::Saturn) {
+            switches(ui, "names-moons", vec![(&mut opt.moons, tl("Lune trovate")), (&mut opt.predicted, tl("Solo previste")), (&mut opt.circles, tl("Cerchi"))]);
         }
-        if key.body == Body::Moon {
+        if body == Body::Moon {
             switches(ui, "names-moon", vec![(&mut opt.craters, tl("Crateri")), (&mut opt.seas, tl("Mari"))]);
-            note(ui, tl("In giallo i crateri sul terminatore."));
         }
-        let colour_row = |ui: &mut Ui, label: &str, colour: &mut [f32; 3]| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(label).size(theme::size::SMALL).color(TEXT_WEAK));
-                for t in Tint::ALL {
-                    let c = t.rgb();
-                    let swatch = Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8);
-                    let chosen = *colour == c;
-                    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-                    ui.painter().rect_filled(rect, 4.0, swatch);
-                    if chosen {
-                        ui.painter().rect_stroke(rect.expand(2.0), 5.0, Stroke::new(2.0, ACCENT), egui::StrokeKind::Outside);
-                    }
-                    if response.on_hover_text(t.label()).clicked() {
-                        *colour = c;
-                    }
-                }
-                ui.color_edit_button_rgb(colour).on_hover_text(tl("Un altro colore"));
-            });
-        };
+        ui.add_space(theme::space::XS);
         colour_row(ui, tl("Colore"), &mut opt.colour);
 
-        section(ui, tl("DIDASCALIA"));
-        let field = |ui: &mut Ui, label: &str, value: &mut String, hint_text: &str, width: f32| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new(label).size(theme::size::SMALL).color(TEXT_WEAK));
-                ui.add(egui::TextEdit::singleline(value).desired_width(width).hint_text(hint_text));
-            });
-        };
-        let full = ui.available_width();
-        field(ui, tl("Titolo (in grande)"), &mut opt.title, tl("Giove, 5 luglio 2019"), full);
-        let half = (full - 10.0) / 2.0;
-        ui.horizontal(|ui| {
-            field(ui, tl("Autore"), &mut opt.author, tl("Nome e cognome"), half);
-            field(ui, tl("Luogo"), &mut opt.location, tl("Città, paese"), half);
+        // The caption only matters once the card's switch writes on the picture.
+        crate::panels::advanced(ui, "annotate-caption", tl("DIDASCALIA"), false, |ui| {
+            ui.add_enabled_ui(on, |ui| {
+                let field = |ui: &mut Ui, label: &str, value: &mut String, hint_text: &str, width: f32| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(label).size(theme::size::SMALL).color(TEXT_WEAK));
+                        ui.add(egui::TextEdit::singleline(value).desired_width(width).hint_text(hint_text));
+                    });
+                };
+                let full = ui.available_width();
+                field(ui, tl("Titolo (in grande)"), &mut opt.title, tl("Giove, 5 luglio 2019"), full);
+                let half = (full - 10.0) / 2.0;
+                ui.horizontal(|ui| {
+                    field(ui, tl("Autore"), &mut opt.author, tl("Nome e cognome"), half);
+                    field(ui, tl("Luogo"), &mut opt.location, tl("Città, paese"), half);
+                });
+                field(ui, tl("Nota"), &mut opt.note, tl("Elaborazione, condizioni…"), full);
+                ui.add_space(theme::space::XS);
+                ui.label(RichText::new(tl("Cosa scrivere")).size(theme::size::SMALL).color(TEXT_WEAK));
+                switches(
+                    ui,
+                    "caption-items",
+                    vec![
+                        (&mut opt.object, tl("Oggetto")),
+                        (&mut opt.filter, tl("Filtro")),
+                        (&mut opt.time, tl("Data e ora")),
+                        (&mut opt.equipment, tl("Strumento")),
+                        (&mut opt.scale, tl("Scala (″/pixel)")),
+                        (&mut opt.angles, tl("Nord e rotazione")),
+                        (&mut opt.compass, tl("Bussola")),
+                    ],
+                );
+                ui.add_space(theme::space::XS);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tl("Posizione")).size(theme::size::SMALL).color(TEXT_WEAK));
+                    egui::ComboBox::from_id_salt("caption-corner").selected_text(opt.corner.label()).show_ui(ui, |ui| {
+                        for c in Corner::ALL {
+                            ui.selectable_value(&mut opt.corner, c, c.label());
+                        }
+                    });
+                });
+                colour_row(ui, tl("Colore del testo"), &mut opt.caption_colour);
+                ParamSlider::new(tl("Dimensione del testo"), &mut opt.size, 1.2..=5.0, 2.4).decimals(1).suffix(" %").show(ui);
+            })
+            .response
+            .on_disabled_hover_text(tl("Accendi l'interruttore della scheda per scrivere titolo e didascalia sull'immagine"));
         });
-        field(ui, tl("Nota"), &mut opt.note, tl("Strumento, elaborazione…"), full);
-        hint_if_empty(ui, opt);
-        ui.add_space(theme::space::XS);
-        ui.label(RichText::new(tl("Cosa scrivere")).size(theme::size::SMALL).color(TEXT_WEAK));
-        switches(
-            ui,
-            "caption-items",
-            vec![
-                (&mut opt.object, tl("Oggetto")),
-                (&mut opt.filter, tl("Filtro")),
-                (&mut opt.time, tl("Data e ora")),
-                (&mut opt.equipment, tl("Telescopio e camera")),
-                (&mut opt.scale, tl("Scala (″/pixel)")),
-                (&mut opt.angles, tl("Nord e rotazione")),
-                (&mut opt.compass, tl("Bussola")),
-            ],
-        );
-        ui.add_space(theme::space::XS);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(tl("Posizione")).size(theme::size::SMALL).color(TEXT_WEAK));
-            egui::ComboBox::from_id_salt("caption-corner").selected_text(opt.corner.label()).show_ui(ui, |ui| {
-                for c in Corner::ALL {
-                    ui.selectable_value(&mut opt.corner, c, c.label());
-                }
-            });
-        });
-        colour_row(ui, tl("Colore del testo"), &mut opt.caption_colour);
-        ParamSlider::new(tl("Dimensione del testo"), &mut opt.size, 1.2..=5.0, 2.4).decimals(1).suffix(" %").show(ui);
-
     }
 
     /// Close-ups of the Moon without a limb: name two craters from the list and click them.
@@ -699,28 +632,39 @@ impl IdentifyState {
 
     /// The tab's content.
     pub fn tab(&mut self, ui: &mut Ui, input: &IdentifyInput, opt: &mut LabelOptions, actions: &mut Vec<PanelAction>) {
-        // Two cards like the other tabs'.
+        // Two cards like the other tabs': what the picture shows, and what is shown over it.
         let mut folded = self.identify_collapsed;
         crate::panels::section_card(ui, ICON_TRAVEL_EXPLORE, tl("Identificazione"), &mut folded, |ui| self.identify_part(ui, input, actions));
         self.identify_collapsed = folded;
-        let mut folded = self.annotate_collapsed;
-        crate::panels::section_card(ui, ICON_EDIT_NOTE, tl("Annotazione"), &mut folded, |ui| self.annotate_part(ui, opt));
-        self.annotate_collapsed = folded;
+        let (mut folded, mut on) = (self.annotate_collapsed, self.annotate);
+        let was_on = on;
+        crate::panels::switch_card(ui, ICON_EDIT_NOTE, tl("Annotazione"), &mut on, &mut folded, |ui| self.annotate_part(ui, opt, was_on));
+        (self.annotate_collapsed, self.annotate) = (folded, on);
     }
 
     /// Object, date, orientation: what puts the moons and craters on their places.
     fn identify_part(&mut self, ui: &mut Ui, input: &IdentifyInput, actions: &mut Vec<PanelAction>) {
         let ctx = ui.ctx().clone();
         let section = |ui: &mut Ui, title: &str| {
-            ui.add_space(theme::space::L);
+            ui.add_space(theme::space::M);
             ui.label(caps(title));
             ui.add_space(theme::space::XS);
         };
-        section(ui, tl("OGGETTO"));
+
+        // The object, and on the right what the marks on the image mean.
         let mut body = self.body.or(input.body);
-        egui::ComboBox::from_id_salt("identify-body").selected_text(body.map_or(tl("Scegli…"), Body::label)).show_ui(ui, |ui| {
-            for b in Body::ALL {
-                ui.selectable_value(&mut body, Some(b), b.label());
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("identify-body").width(110.0).selected_text(body.map_or(tl("Oggetto…"), Body::label)).show_ui(ui, |ui| {
+                for b in Body::ALL {
+                    ui.selectable_value(&mut body, Some(b), b.label());
+                }
+            });
+            help(ui, tl("Il soggetto ripreso: riconosciuto dal nome del file, dal log di ripresa o da com'è fatta l'immagine. Cambialo se non è giusto."));
+            if matches!(body, Some(Body::Jupiter | Body::Saturn)) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("◌ {}", tl("prevista"))).size(theme::size::SMALL).color(TEXT_WEAK));
+                    ui.label(RichText::new(format!("◯ {}", tl("trovata"))).size(theme::size::SMALL).color(TEXT_WEAK));
+                });
             }
         });
         if body != self.body.or(input.body) {
@@ -728,7 +672,8 @@ impl IdentifyState {
             self.orientation_reset();
         }
 
-        section(ui, tl("DATA E ORA"));
+        // Date and time on one row: zone, calendar, clock.
+        ui.add_space(theme::space::S);
         let ut_before = self.time.or(input.time);
         // The system's zone for this very date (daylight saving included), unless set by hand.
         let mut dst = false;
@@ -738,51 +683,11 @@ impl IdentifyState {
             (self.offset_min, dst) = self.zone_for(&ctx, ut);
         }
         let (utc_before, offset_before) = (self.utc, self.offset_min);
-        let tip = if self.utc { tl("Tempo universale: quello che servono le effemeridi") } else { tl("La data nel fuso del computer: viene convertita in UTC da sola") };
         let shift = if self.utc { 0 } else { self.offset_min };
         let ut = self.time.or(input.time).unwrap_or(Moment { year: 2026, month: 1, day: 1, hour: 0, minute: 0, second: 0.0 });
         let mut when = shifted(ut, shift);
         let before = when;
-        // The zone selector and the date on one row.
-        ui.horizontal_wrapped(|ui| {
-            ui.scope(|ui| segmented(ui, &mut self.utc, &[(true, None, "UTC"), (false, None, tl("Ora locale"))])).response.on_hover_text(tip);
-            ui.add_space(theme::space::S);
-            ui.add(egui::DragValue::new(&mut when.year).range(1900..=2100));
-            ui.label("-");
-            ui.add(egui::DragValue::new(&mut when.month).range(1..=12));
-            ui.label("-");
-            ui.add(egui::DragValue::new(&mut when.day).range(1..=31));
-            ui.add_space(theme::space::M);
-            ui.add(egui::DragValue::new(&mut when.hour).range(0..=23));
-            ui.label(":");
-            ui.add(egui::DragValue::new(&mut when.minute).range(0..=59));
-        });
-        if !self.utc {
-            ui.horizontal(|ui| {
-                if self.zone_auto {
-                    ui.label(RichText::new(format!("{} · {}", zone_name(self.offset_min), if dst { tl("ora legale") } else { tl("ora solare") })).color(TEXT));
-                    ui.label(RichText::new(tl("scelto dal computer per questa data")).size(theme::size::SMALL).color(TEXT_WEAK));
-                    if ui.button((ICON_EDIT.rich_text(), tl("Modifica"))).on_hover_text(tl("Imposta il fuso a mano (se il computer è in un altro paese rispetto alla ripresa)")).clicked() {
-                        self.zone_auto = false;
-                    }
-                } else {
-                    ui.label(RichText::new("UTC").size(theme::size::SMALL).color(TEXT_WEAK));
-                    let mut hours = self.offset_min as f32 / 60.0;
-                    if ui.add(egui::DragValue::new(&mut hours).range(-12.0..=14.0).speed(0.25).max_decimals(2).prefix("+").suffix(" h")).on_hover_text(tl("Fuso orario, ora legale compresa (Italia: +1 inverno, +2 estate)")).changed() {
-                        self.offset_min = (hours * 60.0).round() as i32;
-                    }
-                    if ui.button((ICON_AUTO_FIX_HIGH.rich_text(), tl("Automatico"))).on_hover_text(tl("Torna al fuso del computer, con ora legale o solare secondo la data")).clicked() {
-                        self.zone_auto = true;
-                    }
-                }
-            });
-        }
-        let shift = if self.utc { 0 } else { self.offset_min };
-        // Changing the zone keeps the numbers on screen and reads them in the new one.
-        let zone_changed = self.utc != utc_before || self.offset_min != offset_before;
-        if when != before || (zone_changed && ut_before.is_some()) || (self.time.is_none() && input.time.is_none() && ui.button(tl("Usa questa data")).clicked()) {
-            self.time = Some(shifted(when, -shift));
-        }
+        let known = self.time.is_some() || input.time.is_some();
         let source = if self.fit_applied {
             tl("regolata sulle lune")
         } else if self.time.is_some() {
@@ -790,24 +695,61 @@ impl IdentifyState {
         } else if input.time.is_some() {
             input.time_from
         } else {
-            tl("manca: inseriscila per calcolare le effemeridi")
+            tl("manca")
         };
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(source).size(theme::size::SMALL).color(if input.time.is_none() && self.time.is_none() { theme::WARNING } else { TEXT_WEAK }));
-            if self.time.is_some() && input.time.is_some() && ui.button((ICON_RESTART_ALT.rich_text(), tl("Torna a quella del file"))).clicked() {
+            ui.scope(|ui| segmented(ui, &mut self.utc, &[(true, None, "UTC"), (false, None, tl("Locale"))]))
+                .response
+                .on_hover_text(if self.utc { tl("Tempo universale: quello che servono le effemeridi") } else { tl("La data nel fuso del computer: viene convertita in UTC da sola") });
+            date_picker(ui, "identify-date", &mut when.year, &mut when.month, &mut when.day);
+            time_field(ui, "identify-date", &mut when.hour, &mut when.minute);
+            if !known {
+                ui.label(RichText::new(tl("data mancante")).size(theme::size::SMALL).color(theme::WARNING));
+            } else if self.time.is_some() && input.time.is_some() && icon_button(ui, ICON_RESTART_ALT, tl("Torna alla data e ora del file")).clicked() {
                 self.time = None;
                 self.orientation_reset();
+                self.fitted_path = None;
+            }
+            let ut_now = shifted(when, -shift);
+            help(
+                ui,
+                &tr!(
+                    "Data e ora della ripresa ({}).\nUsate per il calcolo: {:04}-{:02}-{:02} {:02}:{:02} UTC.\nUTC è il tempo universale: in Italia è l'ora solare meno 1 ora, o l'ora legale meno 2.",
+                    "Date and time of the capture ({}).\nUsed for the calculation: {:04}-{:02}-{:02} {:02}:{:02} UTC.\nUTC is universal time: in Italy it is standard time minus 1 hour, or summer time minus 2.",
+                    source,
+                    ut_now.year,
+                    ut_now.month,
+                    ut_now.day,
+                    ut_now.hour,
+                    ut_now.minute
+                ),
+            );
+            if !self.utc {
+                if self.zone_auto {
+                    let name = format!("{} · {}", zone_name(self.offset_min), if dst { tl("legale") } else { tl("solare") });
+                    if ui.add(egui::Button::new(RichText::new(name).size(theme::size::SMALL).color(TEXT_WEAK)).frame(false)).on_hover_text(tl("Fuso scelto dal computer per questa data. Clic per impostarlo a mano (se il computer è in un altro paese rispetto alla ripresa)")).clicked() {
+                        self.zone_auto = false;
+                    }
+                } else {
+                    let mut hours = self.offset_min as f32 / 60.0;
+                    if ui.add(egui::DragValue::new(&mut hours).range(-12.0..=14.0).speed(0.25).max_decimals(2).prefix("UTC+").suffix(" h")).on_hover_text(tl("Fuso orario, ora legale compresa (Italia: +1 inverno, +2 estate)")).changed() {
+                        self.offset_min = (hours * 60.0).round() as i32;
+                    }
+                    if icon_button(ui, ICON_AUTO_FIX_HIGH, tl("Torna al fuso del computer, con ora legale o solare secondo la data")).clicked() {
+                        self.zone_auto = true;
+                    }
+                }
             }
         });
-        if self.utc {
-            note(ui, tl("UTC è il tempo universale: in Italia è l'ora solare meno 1 ora, o l'ora legale meno 2."));
-        } else {
-            let t = shifted(ut, 0);
-            note(ui, &tr!("Corrisponde a {:04}-{:02}-{:02} {:02}:{:02} UTC, usato per il calcolo.", "Corresponds to {:04}-{:02}-{:02} {:02}:{:02} UTC, used for the calculation.", t.year, t.month, t.day, t.hour, t.minute));
+        let shift = if self.utc { 0 } else { self.offset_min };
+        // Changing the zone keeps the numbers on screen and reads them in the new one.
+        let zone_changed = self.utc != utc_before || self.offset_min != offset_before;
+        if when != before || (zone_changed && ut_before.is_some()) {
+            self.time = Some(shifted(when, -shift));
         }
 
         let Some((key, id)) = &self.result else {
-            ui.add_space(theme::space::L);
+            ui.add_space(theme::space::M);
             if self.pending.is_some() {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -815,108 +757,93 @@ impl IdentifyState {
                 });
             } else if body.is_none() {
                 note(ui, tl("Scegli l'oggetto ripreso."));
+            } else if !known {
+                note(ui, tl("Imposta data e ora della ripresa per calcolare le effemeridi."));
             }
             return;
         };
         let (key, id) = (*key, Arc::clone(id));
-
-        if matches!(key.body, Body::Jupiter | Body::Saturn) && id.labels.iter().any(|l| matches!(l.kind, LabelKind::MoonFound | LabelKind::MoonPredicted)) {
-            ui.add_space(theme::space::S);
-            ui.horizontal_wrapped(|ui| {
-                let can = id.orientation.is_some() && self.fitting.is_none();
-                if ui
-                    .add_enabled(can, egui::Button::new((ICON_SCHEDULE.rich_text(), tl("Regola sulle lune"))))
-                    .on_hover_text(tl("Cerca insieme l'ora (entro ±3 ore), una piccola rotazione e la distanza delle lune, in modo che TUTTE le lune calcolate cadano sui punti luminosi dell'immagine"))
-                    .clicked()
-                    && let Some(or) = id.orientation
-                {
-                    self.start_fit(&ctx, input.source, key.body, key.when, or, false);
-                }
-                toggle(ui, &mut self.fit_orientation);
-                ui.label(tl("Orientamento")).on_hover_text(tl("Regola anche la rotazione e la distanza delle lune; spento, si muove solo l'ora"));
-                toggle(ui, &mut self.fit_upright);
-                ui.label(tl("Raddrizza")).on_hover_text(tl("Dopo la regolazione ruota l'immagine con il nord in alto"));
-                if self.fitting.is_some() {
-                    ui.spinner();
-                }
-            });
-            if let Some(text) = &self.fit_note {
-                note(ui, text);
-            }
-        }
-
-        section(ui, tl("SULL'IMMAGINE"));
-        ui.horizontal(|ui| {
-            toggle(ui, &mut self.show_labels);
-            ui.label(tl("Mostra i nomi sull'immagine"));
-        });
-        if matches!(key.body, Body::Jupiter | Body::Saturn) {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("◯").color(Color32::from_rgb(120, 230, 140)));
-                ui.label(RichText::new(tl("trovata nell'immagine")).size(theme::size::SMALL).color(TEXT_WEAK));
-                ui.label(RichText::new("◌").color(Color32::from_rgb(255, 190, 90)));
-                ui.label(RichText::new(tl("posizione prevista")).size(theme::size::SMALL).color(TEXT_WEAK));
-            });
-        }
+        let can_fit = matches!(key.body, Body::Jupiter | Body::Saturn) && id.labels.iter().any(|l| matches!(l.kind, LabelKind::MoonFound | LabelKind::MoonPredicted));
 
         if let Some(or) = id.orientation {
             section(ui, tl("ORIENTAMENTO"));
             let locked = self.placed.is_some();
-            let mut automatic = self.manual.is_none();
             if locked {
-                ui.label(tl("Dai due crateri indicati"));
-            }
-            if !locked {
+                ui.label(RichText::new(tl("Dai due crateri indicati")).color(TEXT));
+            } else {
+                // Automatic (found in the picture, fitted to the moons) or by hand.
+                let mut by_hand = self.manual.is_some() && !self.fit_applied;
+                let was = by_hand;
                 ui.horizontal(|ui| {
-                    if toggle(ui, &mut automatic).changed() {
-                        self.manual = if automatic { None } else { Some(or) };
+                    let auto_label = if can_fit { tl("Sulle lune") } else { tl("Automatico") };
+                    segmented(ui, &mut by_hand, &[(false, Some(ICON_AUTO_FIX_HIGH), auto_label), (true, Some(ICON_TUNE), tl("A mano"))]);
+                    if self.fitting.is_some() {
+                        ui.spinner();
+                    } else if can_fit
+                        && !by_hand
+                        && icon_button(ui, ICON_REFRESH, tl("Cerca di nuovo ora, rotazione e distanza delle lune, in modo che tutte le lune calcolate cadano sui punti luminosi dell'immagine (ora entro ±3 ore)")).clicked()
+                    {
+                        self.refit_automatically();
+                    }
+                    help(ui, tl("Sulle lune: cerco insieme l'ora, una piccola rotazione e la distanza delle lune, così che tutte le lune calcolate cadano sui punti luminosi. A mano: regoli tu l'orientamento."));
+                });
+                if by_hand != was {
+                    if by_hand {
+                        self.manual = Some(self.manual.unwrap_or(or));
+                        self.fit_applied = false;
+                    } else if can_fit {
+                        self.refit_automatically();
+                    } else {
+                        (self.manual, self.fit_applied) = (None, false);
+                    }
+                }
+                if by_hand {
+                    let mut manual = self.manual.unwrap_or(or);
+                    let mut angle = ((manual.angle + 180.0).rem_euclid(360.0)) - 180.0;
+                    let mut changed = ParamSlider::new(tl("Rotazione"), &mut angle, -180.0..=180.0, 0.0).decimals(1).suffix("°").show(ui);
+                    ui.horizontal(|ui| {
+                        if ui.button((ICON_ROTATE_RIGHT.rich_text(), tl("Ruota di 180°"))).clicked() {
+                            angle += 180.0;
+                            changed = true;
+                        }
+                        changed |= toggle(ui, &mut manual.mirrored).changed();
+                        ui.label(tl("Specchiata")).on_hover_text(tl("Immagine ribaltata (diagonale, Newton): est e ovest scambiati"));
+                    });
+                    if changed {
+                        manual.angle = angle.rem_euclid(360.0);
+                        self.manual = Some(manual);
                         self.fit_applied = false;
                     }
-                    ui.label(if self.fit_applied {
-                        tl("Regolato sulle lune")
-                    } else if automatic {
-                        if id.orientation_found { tl("Trovato nell'immagine") } else { tl("Stimato") }
-                    } else {
-                        tl("Impostato a mano")
+                } else if let Some(text) = &self.fit_note {
+                    note(ui, text);
+                } else if !can_fit {
+                    note(ui, if id.orientation_found { tl("Trovato nell'immagine") } else { tl("Stimato") });
+                }
+                if can_fit && !by_hand {
+                    ui.horizontal(|ui| {
+                        toggle(ui, &mut self.fit_upright);
+                        ui.label(tl("Raddrizza dopo la regolazione")).on_hover_text(tl("Dopo la regolazione sulle lune ruota l'immagine con il nord in alto"));
                     });
-                });
+                }
             }
-            let mut manual = if locked { or } else { self.manual.unwrap_or(or) };
-            let mut angle = ((manual.angle + 180.0).rem_euclid(360.0)) - 180.0;
-            let mut changed = false;
-            if !locked {
-                changed = ParamSlider::new(tl("Rotazione"), &mut angle, -180.0..=180.0, 0.0).decimals(1).suffix("°").show(ui);
-                ui.horizontal(|ui| {
-                    if ui.button((ICON_ROTATE_RIGHT.rich_text(), tl("Ruota di 180°"))).clicked() {
-                        angle += 180.0;
-                        changed = true;
+            // North, and straightening the picture.
+            let current = if locked { or } else { self.manual.unwrap_or(or) };
+            let (mirror, degrees) = current.upright();
+            let straight = !mirror && degrees.rem_euclid(360.0).min(360.0 - degrees.rem_euclid(360.0)) < 0.5;
+            ui.add_space(theme::space::XS);
+            ui.horizontal(|ui| {
+                let text = if straight { tl("Nord in alto").to_string() } else { tr!("Nord a {:.0}° dall'alto{}", "North {:.0}° from the top{}", current.north_up_angle().rem_euclid(360.0), if current.mirrored { tl(" · specchiata") } else { "" }) };
+                ui.label(RichText::new(text).size(theme::size::SMALL).color(TEXT_WEAK));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(!straight, egui::Button::new((ICON_NORTH.rich_text(), tl("Raddrizza"))))
+                        .on_hover_text(tl("Ruota l'immagine (e la specchia, se serve) così che il nord stia in alto e le lune dal lato giusto, come il cielo a occhio nudo. Il ritaglio si azzera."))
+                        .clicked()
+                    {
+                        actions.push(PanelAction::NorthUp { mirror, degrees });
                     }
                 });
-                ui.horizontal(|ui| {
-                    changed |= toggle(ui, &mut manual.mirrored).changed();
-                    ui.label(tl("Specchiata")).on_hover_text(tl("Immagine ribaltata (diagonale, Newton): est e ovest scambiati"));
-                });
-            }
-            if changed {
-                manual.angle = angle.rem_euclid(360.0);
-                self.manual = Some(manual);
-                self.fit_applied = false;
-            }
-            let north = manual.north_up_angle();
-            note(ui, &tr!("Il nord dell'oggetto punta a {:.0}° dall'alto, in senso orario{}.", "The object's north points {:.0}° from the top, clockwise{}.", north.rem_euclid(360.0), if manual.mirrored { tl("; immagine specchiata") } else { "" }));
-            let (mirror, degrees) = manual.upright();
-            let straight = !mirror && degrees.rem_euclid(360.0).min(360.0 - degrees.rem_euclid(360.0)) < 0.5;
-            ui.add_space(theme::space::S);
-            if ui
-                .add_enabled(!straight, egui::Button::new((ICON_NORTH.rich_text(), tl("Raddrizza: nord in alto"))).min_size(egui::vec2(ui.available_width(), 28.0)))
-                .on_hover_text(tl("Ruota l'immagine (e la specchia, se serve) così che il nord stia in alto e le lune dal lato giusto, come il cielo a occhio nudo. Il ritaglio si azzera."))
-                .clicked()
-            {
-                actions.push(PanelAction::NorthUp { mirror, degrees });
-            }
-            if straight {
-                note(ui, tl("L'immagine è già dritta: nord in alto."));
-            }
+            });
         }
 
         if key.body == Body::Moon {
@@ -951,6 +878,32 @@ impl IdentifyState {
             });
         }
     }
+}
+
+/// A small «?» whose tooltip holds the explanation that would otherwise take room in the tab.
+fn help(ui: &mut Ui, text: &str) {
+    ui.label(ICON_HELP.rich_text().size(theme::size::ICON_SMALL).color(TEXT_WEAK)).on_hover_text(text);
+}
+
+/// A row of colour swatches and a free colour.
+fn colour_row(ui: &mut Ui, label: &str, colour: &mut [f32; 3]) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(label).size(theme::size::SMALL).color(TEXT_WEAK));
+        for t in Tint::ALL {
+            let c = t.rgb();
+            let swatch = Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8);
+            let chosen = (0..3).all(|k| (colour[k] - c[k]).abs() < 0.004);
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+            ui.painter().rect_filled(rect, 4.0, swatch);
+            if chosen {
+                ui.painter().rect_stroke(rect.expand(2.0), 5.0, Stroke::new(2.0, ACCENT), egui::StrokeKind::Outside);
+            }
+            if response.on_hover_text(t.label()).clicked() {
+                *colour = c;
+            }
+        }
+        ui.color_edit_button_rgb(colour).on_hover_text(tl("Un altro colore"));
+    });
 }
 
 #[cfg(test)]

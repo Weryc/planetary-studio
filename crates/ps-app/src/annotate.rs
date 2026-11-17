@@ -119,7 +119,7 @@ pub struct LabelOptions {
 
 impl Default for LabelOptions {
     fn default() -> Self {
-        Self { circles: false, moons: true, predicted: false, craters: true, seas: true, object: true, filter: true, time: true, scale: false, equipment: false, compass: true, angles: false, size: 2.4, colour: Tint::White.rgb(), caption_colour: Tint::White.rgb(), title: String::new(), author: String::new(), location: String::new(), note: String::new(), corner: Corner::BottomLeft }
+        Self { circles: true, moons: true, predicted: true, craters: true, seas: true, object: true, filter: true, time: true, scale: false, equipment: false, compass: true, angles: false, size: 2.4, colour: Tint::White.rgb(), caption_colour: Tint::White.rgb(), title: String::new(), author: String::new(), location: String::new(), note: String::new(), corner: Corner::BottomLeft }
     }
 }
 
