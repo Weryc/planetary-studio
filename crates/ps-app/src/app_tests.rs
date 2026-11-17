@@ -36,7 +36,7 @@ fn english_interface_has_no_italian_left() {
         let mut harness = opened([1400.0, 2600.0], image);
         let mut leaks = std::collections::BTreeSet::new();
         let mut seen = 0;
-        for area in [prefs_group::Group::Favorites, prefs_group::Group::Sharpness, prefs_group::Group::Corrections, prefs_group::Group::Noise, prefs_group::Group::Tone, prefs_group::Group::Color, prefs_group::Group::Regions, prefs_group::Group::Identify, prefs_group::Group::Export] {
+        for area in [prefs_group::Group::Favorites, prefs_group::Group::Sharpness, prefs_group::Group::Noise, prefs_group::Group::Tone, prefs_group::Group::Color, prefs_group::Group::Regions, prefs_group::Group::Identify, prefs_group::Group::Export] {
             {
                 let app = harness.state_mut();
                 app.prefs.current_area = area.name().to_string();
@@ -337,7 +337,7 @@ fn comparison_keeps_a_or_b() {
 fn keys_and_double_click() {
     let image = Image::new(64, 32, vec![(0..64 * 32).map(|i| (i % 64) as f32 / 64.0).collect()], 16);
     let mut harness = opened([1400.0, 900.0], image);
-    harness.key_press(Key::Num4);
+    harness.key_press(Key::Num3);
     harness.run_steps(2);
     assert_eq!(harness.state().prefs.current_area, "Curve e livelli");
     harness.key_press(Key::Num1);
@@ -688,10 +688,10 @@ fn snapshot() {
     settle(&mut harness);
     harness.render().unwrap().save(out_dir.join("ui_auto.png")).unwrap();
 
-    // "Correzione artefatti" with the dering card open: indented cards, reset buttons.
+    // "Rumore e artefatti" with the dering card open: indented cards, reset buttons.
     {
         let app = harness.state_mut();
-        app.prefs.current_area = "Correzione artefatti".into();
+        app.prefs.current_area = "Rumore e artefatti".into();
         app.prefs.expanded = [Stage::Dering].into();
         // A stroke along the right limb, the brush in hand and the ring shown.
         let doc = app.document.as_ref().unwrap();

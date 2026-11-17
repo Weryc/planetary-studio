@@ -1237,11 +1237,11 @@ fn smart_controls(ui: &mut Ui, p: &mut SmartParams, auto: &SmartParams, analysis
         ui.label(RichText::new(tl("Curva")).size(theme::size::BODY));
         crate::widgets::help_icon(ui, p.curve.description());
         egui::ComboBox::from_id_salt("smart-curve").width(170.0).selected_text(RichText::new(p.curve.label()).size(theme::size::BODY)).show_ui(ui, |ui| {
-            // The learned shape only when the model had an answer for this image, the network's
-            // only when there is one for the subject.
-            let learned = (!p.learned.is_empty()).then_some(SmartCurve::Learned);
+            // The standard curve, and the learned one when there is a network for the subject
+            // (Jupiter for now). A project saved with the older learned shape keeps showing it.
             let network = (!p.network.is_empty()).then_some(SmartCurve::Network);
-            for curve in network.into_iter().chain(learned).chain(SmartCurve::ALL) {
+            let older = (p.curve == SmartCurve::Learned).then_some(SmartCurve::Learned);
+            for curve in network.into_iter().chain(older).chain(SmartCurve::ALL) {
                 let text = (RichText::new(curve.label()).size(theme::size::BODY), RichText::new(if curve == auto.curve { tl("  predefinita") } else { "" }).size(theme::size::SMALL).color(TEXT_WEAK));
                 if ui.add(egui::Button::selectable(curve == p.curve, text)).on_hover_text(curve.description()).clicked() {
                     // A learned shape comes with its own strength, the network's too.
@@ -2313,22 +2313,38 @@ fn mask_tools(
 // ---- noise, contrast, tone -----------------------------------------------------------------
 
 pub fn denoise_body(ui: &mut Ui, p: &mut NoiseParams, mono: bool, why: Option<&[String]>) {
-    segmented(
-        ui,
-        &mut p.method,
-        &[(NoiseMethod::Learned, Some(ICON_NEUROLOGY), tl("Appreso")), (NoiseMethod::Planetary, Some(ICON_PUBLIC), tl("Pianeti")), (NoiseMethod::Lunar, Some(ICON_NIGHTLIGHT), tl("Luna e Sole")), (NoiseMethod::Guided, Some(ICON_AUTO_AWESOME), tl("Rete del rumore"))],
-    );
-    hint(
-        ui,
-        match p.method {
-            NoiseMethod::Learned if !ps_core::denoise_net::available() => tl("Pesi del modello non presenti in questa versione: si usa il metodo Pianeti."),
-            NoiseMethod::Learned => tl("Rete addestrata su stack planetari simulati: riconosce bande, crateri e granulazione e toglie solo il rumore."),
-            NoiseMethod::Planetary => tl("Wavelet multiscala: toglie la grana fine senza intaccare bande e dettagli morbidi."),
-            NoiseMethod::Lunar => tl("Filtro che rispetta i bordi: pulisce le zone piatte e lascia netti crateri e granulazione."),
-            NoiseMethod::Guided => tl("Sperimentale. Una rete addestrata su stack simulati di Giove e tarata su riprese vere stima quanto rumore c'è a ogni dimensione di dettaglio, nella grana e nel colore, e toglie solo quella parte. Gestisce da sola il rumore di colore. Serve un disco intero; altrimenti usa il metodo Appreso."),
-        },
-    );
-    ParamSlider::new(tl("Intensità"), &mut p.strength, 0.0..=3.0, 0.0).help(tl("In multipli del rumore misurato sull'immagine (1 = standard)")).show(ui);
+    // The noise network is the method; the two filters below it are for when it can't be used.
+    // The older learned method is gone from the choices: a project that had it uses the network.
+    if p.method == NoiseMethod::Learned {
+        p.method = NoiseMethod::Guided;
+    }
+    let network = p.method == NoiseMethod::Guided;
+    egui::Frame::new()
+        .fill(if network { theme::lerp_color(theme::SURFACE, ACCENT, 0.10) } else { BG })
+        .stroke(Stroke::new(1.0, if network { ACCENT_DIM } else { BORDER }))
+        .corner_radius(CornerRadius::same(theme::radius::L))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let response = ui.add(egui::Button::selectable(network, (ICON_AUTO_AWESOME.rich_text().color(ACCENT), RichText::new(tl("Rete del rumore")).strong().color(TEXT))).frame(false).min_size(egui::vec2(ui.available_width(), 24.0)));
+            if response.clicked() {
+                p.method = NoiseMethod::Guided;
+            }
+            note(ui, tl("Una rete addestrata su stack simulati di Giove e tarata su riprese vere stima quanto rumore c'è a ogni dimensione di dettaglio, nella grana e nel colore, e toglie solo quella parte. Gestisce da sola il rumore di colore. Serve un disco intero; altrimenti usa il metodo Pianeti."));
+        });
+    ui.add_space(theme::space::S);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(tl("Altri metodi")).size(theme::size::SMALL).color(TEXT_WEAK));
+        crate::widgets::help_icon(ui, tl("Filtri più semplici, per quando la rete non si può usare (per esempio senza un disco intero)."));
+        segmented(ui, &mut p.method, &[(NoiseMethod::Guided, None, tl("Rete")), (NoiseMethod::Planetary, Some(ICON_PUBLIC), tl("Pianeti")), (NoiseMethod::Lunar, Some(ICON_NIGHTLIGHT), tl("Luna e Sole"))]);
+    });
+    match p.method {
+        NoiseMethod::Planetary => hint(ui, tl("Wavelet multiscala: toglie la grana fine senza intaccare bande e dettagli morbidi.")),
+        NoiseMethod::Lunar => hint(ui, tl("Filtro che rispetta i bordi: pulisce le zone piatte e lascia netti crateri e granulazione.")),
+        _ => {}
+    }
+    ui.add_space(theme::space::S);
+    ParamSlider::new(tl("Intensità"), &mut p.strength, 0.0..=5.0, 0.0).help(tl("In multipli del rumore misurato sull'immagine (1 = standard; oltre 3 toglie ancora più rumore, a scapito dei dettagli più fini)")).show(ui);
     if p.method != NoiseMethod::Planetary {
         ParamSlider::new(tl("Dettaglio"), &mut p.detail, 0.0..=1.0, 0.3).help(tl("Quanta trama fine restituire dopo la pulizia")).show(ui);
     }

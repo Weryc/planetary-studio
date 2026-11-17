@@ -107,6 +107,8 @@ pub struct LabelOptions {
     pub size: f32,
     /// Colour of the names on the picture.
     pub colour: [f32; 3],
+    /// Colour of the moons only predicted (their spot wasn't found in the image).
+    pub predicted_colour: [f32; 3],
     /// Colour of the caption and the compass.
     pub caption_colour: [f32; 3],
     /// Free lines, printed when not empty: a title (larger), who took the picture, where, a note.
@@ -119,7 +121,7 @@ pub struct LabelOptions {
 
 impl Default for LabelOptions {
     fn default() -> Self {
-        Self { circles: true, moons: true, predicted: true, craters: true, seas: true, object: true, filter: true, time: true, scale: false, equipment: false, compass: true, angles: false, size: 2.4, colour: Tint::White.rgb(), caption_colour: Tint::White.rgb(), title: String::new(), author: String::new(), location: String::new(), note: String::new(), corner: Corner::BottomLeft }
+        Self { circles: true, moons: true, predicted: true, craters: true, seas: true, object: true, filter: true, time: true, scale: false, equipment: false, compass: true, angles: false, size: 2.4, colour: Tint::White.rgb(), predicted_colour: Tint::Orange.rgb(), caption_colour: Tint::White.rgb(), title: String::new(), author: String::new(), location: String::new(), note: String::new(), corner: Corner::BottomLeft }
     }
 }
 
@@ -391,7 +393,7 @@ pub fn burn_in(img: &Image, plan: &Plan, opt: &LabelOptions) -> Image {
     let rgb = opt.colour;
     let grey = |c: [f32; 3]| (c[0] - c[1]).abs() < 0.02 && (c[1] - c[2]).abs() < 0.02;
     // A coloured layer needs three channels.
-    if out.is_mono() && !(grey(opt.colour) && grey(opt.caption_colour)) {
+    if out.is_mono() && !(grey(opt.colour) && grey(opt.predicted_colour) && grey(opt.caption_colour)) {
         let plane = out.channels()[0].clone();
         out = Image::new(out.width(), out.height(), vec![plane.clone(), plane.clone(), plane], out.source_bit_depth);
     }
@@ -411,6 +413,7 @@ pub fn burn_in(img: &Image, plan: &Plan, opt: &LabelOptions) -> Image {
                 if (l.kind == LabelKind::MoonFound && !opt.moons) || (l.kind == LabelKind::MoonPredicted && !opt.predicted) {
                     continue;
                 }
+                let rgb = if l.kind == LabelKind::MoonPredicted { opt.predicted_colour } else { rgb };
                 let r = if opt.circles { px * 0.55 } else { 0.0 };
                 if opt.circles {
                     canvas.ring((x, y), r, (px / 14.0).max(1.2), rgb);
