@@ -28,6 +28,20 @@ import math
 import random
 
 SEED = 20261115
+# Frames generated and share kept (training rows); `--frames LO HI --share LO HI --seed N` change
+# them (`--share`, since `--keep` keeps rows of an old plan). Revision 3 (2026-11-16): 1000–6000 frames, 25–75 % kept, like the real recordings the
+# noise is calibrated on (the first plans had 300–3000 and 10–30 %: far noisier stacks).
+import sys as _sys
+def _opt(k, default):
+    a = _sys.argv
+    return (float(a[a.index(k) + 1]), float(a[a.index(k) + 2])) if k in a else default
+FRAMES = _opt("--frames", (300, 3000))
+KEEP = _opt("--share", (0.10, 0.30))
+# The validation grid takes the middle of those ranges (1500 frames, 20 % before).
+VAL_FRAMES = int(round(math.sqrt(FRAMES[0] * FRAMES[1]), -2)) if "--frames" in _sys.argv else 1500
+VAL_KEEP = round(0.5 * (KEEP[0] + KEEP[1]), 2) if "--share" in _sys.argv else 0.2
+if "--seed" in _sys.argv:
+    SEED = int(_sys.argv[_sys.argv.index("--seed") + 1])
 SCOPES = {  # name: aperture (mm)
     "apo102": 102, "mak127": 127, "newton200": 200, "c8": 203, "sc235": 235, "sc356": 356, "edgehd11": 279.4,
 }
@@ -68,11 +82,11 @@ def train_rows(rng, done=None):
             r0 = math.exp(rng.uniform(math.log(R0_CM[0]), math.log(R0_CM[1])))
             gain = rng.choice(["basso", "medio", "alto"])
             bits = 12 if gain == "basso" else rng.choice([8, 8, 12])
-            frames = int(round(math.exp(rng.uniform(math.log(300), math.log(3000))), -1))
+            frames = int(round(math.exp(rng.uniform(math.log(FRAMES[0]), math.log(FRAMES[1]))), -1))
             rows.append({
                 "split": "train", "group": g, "ref": files[k % len(files)], "scope": scope, "camera": camera,
                 "d_r0": d_r0(scope, r0, D_R0_FLOOR), "r0_cm": round(r0, 1), "night": "-", "gain": gain, "bits": bits,
-                "frames": frames, "keep": round(rng.uniform(0.10, 0.30), 2), "diam": round(rng.uniform(33, 49), 1),
+                "frames": frames, "keep": round(rng.uniform(*KEEP), 2), "diam": round(rng.uniform(33, 49), 1),
                 "ground": round(rng.uniform(0.45, 0.75), 2),
             })
         per_group.append(rows)
@@ -96,8 +110,8 @@ def validation_rows(done_cells=frozenset()):
                 continue
             rows.append({
                 "split": "val", "group": g, "ref": f, "scope": scope, "camera": "asi678mc" if scope == "edgehd11" else "imx462c",
-                "d_r0": d_r0(scope, r0), "r0_cm": r0, "night": night, "gain": "medio", "bits": 8, "frames": 1500,
-                "keep": 0.2, "diam": 44.0, "ground": 0.6,
+                "d_r0": d_r0(scope, r0), "r0_cm": r0, "night": night, "gain": "medio", "bits": 8, "frames": VAL_FRAMES,
+                "keep": VAL_KEEP, "diam": 44.0, "ground": 0.6,
             })
         per_group.append(rows)
     out = []

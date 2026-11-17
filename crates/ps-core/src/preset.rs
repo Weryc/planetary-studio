@@ -640,6 +640,7 @@ pub fn explain(kind: ImageKind, analysis: &Analysis, scales: ScaleMode) -> Expla
         NoiseMethod::Planetary => tl("Metodo Pianeti: il rumore è una grana fine sopra dettagli morbidi; toglierlo dalle 3 scale più fini lascia intatte bande e festoni.").to_string(),
         NoiseMethod::Lunar => tl("Metodo Luna e Sole: crateri, ombre e granulazione hanno bordi netti; il filtro bilaterale media solo pixel simili e non li ammorbidisce.").to_string(),
         NoiseMethod::Learned => tl("Metodo appreso: una piccola rete addestrata su stack simulati di pianeti, Luna e Sole riconosce il dettaglio dal suo aspetto e toglie solo il rumore.").to_string(),
+        NoiseMethod::Guided => tl("Metodo guidato dalla rete del rumore: stima quanto rumore c'è a ogni dimensione di dettaglio, nella luminosità e nel colore, e toglie solo quella parte.").to_string(),
     }];
     denoise.push(match kind {
         ImageKind::Saturn => tl("Intensità ridotta: anche le divisioni sottili degli anelli sono dettaglio fine e non vanno cancellate.").into(),

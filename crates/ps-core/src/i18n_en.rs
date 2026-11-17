@@ -918,4 +918,7 @@ pub static EN: &[(&str, &str)] = &[
     ("poco cielo attorno al disco", "little sky around the disk"),
     ("cielo nero senza rumore (tagliato a zero)", "black sky without noise (clipped to zero)"),
     ("cielo uniforme senza rumore", "uniform sky without noise"),
+    ("Rete del rumore", "Noise network"),
+    ("Metodo guidato dalla rete del rumore: stima quanto rumore c'è a ogni dimensione di dettaglio, nella luminosità e nel colore, e toglie solo quella parte.", "Method guided by the noise network: it estimates how much noise there is at each size of detail, in brightness and in colour, and removes only that share."),
+    ("Sperimentale. Una rete addestrata su stack simulati di Giove e tarata su riprese vere stima quanto rumore c'è a ogni dimensione di dettaglio, nella grana e nel colore, e toglie solo quella parte. Gestisce da sola il rumore di colore. Serve un disco intero; altrimenti usa il metodo Appreso.", "Experimental. A network trained on simulated Jupiter stacks and calibrated on real recordings estimates how much noise there is at each size of detail, in the grain and in the colour, and removes only that share. It handles colour noise itself. It needs a whole disk; otherwise the Learned method is used."),
 ];
