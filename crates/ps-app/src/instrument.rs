@@ -26,16 +26,40 @@ pub struct CaptureState {
     pub body: Option<Body>,
     /// Scale measured from the subject's size and its apparent diameter (arcsec per pixel).
     pub scale: Option<f32>,
+    /// Where the time came from: the log, the file's own header (SER, FITS) or its name.
+    pub time_from: &'static str,
 }
 
 impl CaptureState {
-    /// From the file name and the first log found beside the image (the log wins).
+    /// What the capture's own data say, most official first: the log beside the image, then the
+    /// header of the file (SER video beside it, FITS), then the name of the file, else the name
+    /// of the folder for the subject.
     pub fn read(path: &Path) -> CaptureState {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let mut state = CaptureState { info: capture::from_name(stem), ..Default::default() };
+        if state.info.time.is_some() {
+            state.time_from = tl("dal nome del file");
+        }
+        for header in capture::headers_beside(path) {
+            if let Some(h) = capture::from_header(&header) {
+                if h.time.is_some() {
+                    state.time_from = tl("dall'intestazione del file");
+                }
+                state.info = h.or(state.info);
+                break;
+            }
+        }
         if let Some((log, text)) = capture::logs_beside(path).into_iter().find_map(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t))) {
-            state.info = capture::from_log(&text).or(state.info);
+            let from_log = capture::from_log(&text);
+            if from_log.time.is_some() {
+                state.time_from = tl("dal log di ripresa");
+            }
+            state.info = from_log.or(state.info);
             state.log = Some(log);
+        }
+        // Last resort for the subject: the folder the pictures are kept in.
+        if state.info.body.is_none() {
+            state.info.body = path.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()).and_then(capture::body_in);
         }
         state.body = state.info.body;
         state
@@ -45,6 +69,9 @@ impl CaptureState {
     pub fn add_log(&mut self, path: &Path, text: &str) {
         let info = capture::from_log(text);
         self.body = info.body.or(self.body);
+        if info.time.is_some() {
+            self.time_from = tl("dal log di ripresa");
+        }
         self.info = info.or(std::mem::take(&mut self.info));
         self.log = Some(path.to_path_buf());
     }
