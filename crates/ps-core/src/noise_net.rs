@@ -129,6 +129,9 @@ pub struct NoiseModel {
     pub calibration: &'static [f32],
 }
 
+/// Detail coarser than this (cycles/px, a period of about 14 px) is never reduced.
+pub const SMALLEST_NOISE_FREQUENCY: f32 = 0.07;
+
 /// First band the estimator answers for (band 0 is the mean, band 1 holds almost no
 /// frequencies at planetary sizes).
 pub const FIRST_BAND: usize = 2;
@@ -188,6 +191,11 @@ pub fn guided_denoise(img: &Image, strength: f32) -> Option<Image> {
     let gains = |power: &[f32], noise: &[f32]| -> Vec<f32> {
         let mut g = vec![1.0f32; BANDS];
         for (j, b) in (FIRST_BAND..BANDS).enumerate() {
+            // Larger detail is left alone: there two stacks of the same recording differ by the
+            // seeing's leftover deformation, not by noise a reduction could remove.
+            if crate::curve_net::band_centre(b) < SMALLEST_NOISE_FREQUENCY {
+                continue;
+            }
             let ratio = 10f32.powf(noise[j] - power[b]);
             g[b] = (1.0 - strength.max(0.0) * ratio).clamp(0.0, 1.0);
         }
@@ -205,4 +213,28 @@ pub fn guided_denoise(img: &Image, strength: f32) -> Option<Image> {
     let b: Vec<f32> = y2.iter().zip(&cb2).map(|(y, c)| y + c).collect();
     let g: Vec<f32> = (0..w * h).map(|i| (y2[i] - LUMA[0] * r[i] - LUMA[2] * b[i]) / LUMA[1]).collect();
     Some(Image::new(w, h, vec![r, g, b], img.source_bit_depth))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The exported networks answer as in Python: `NOISE_NET_CHECK` names a JSON list of
+    /// {"x": inputs, "p": expected outputs}.
+    #[test]
+    fn exported_networks_match_training() {
+        let Ok(path) = std::env::var("NOISE_NET_CHECK") else { return };
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut checked = 0;
+        for item in text.split("{\"x\": [").skip(1) {
+            let (xs, rest) = item.split_once("], \"p\": [").unwrap();
+            let ps = rest.split(']').next().unwrap();
+            let parse = |s: &str| s.split(',').map(|v| v.trim().parse::<f32>().unwrap()).collect::<Vec<_>>();
+            let (x, p) = (parse(xs), parse(ps));
+            let (l, c) = super::model().predict(&x).unwrap();
+            for (a, b) in l.iter().chain(&c).zip(&p) {
+                assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+            }
+            checked += 1;
+        }
+        assert!(checked > 0);
+    }
 }

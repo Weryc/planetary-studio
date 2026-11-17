@@ -17,11 +17,12 @@ fn main() {
         let img = ps_io::load(&path).unwrap();
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         let started = std::time::Instant::now();
-        let p = NoiseParams { method: NoiseMethod::Guided, strength: 1.0, detail: 0.0, chroma: 0, sky: 0.0 };
+        let strength: f32 = std::env::var("STRENGTH").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let p = NoiseParams { method: NoiseMethod::Guided, strength, detail: 0.0, chroma: 0, sky: 0.0 };
         let cleaned = denoise(&img, &p);
         let ms = started.elapsed().as_millis();
         let a = ps_core::analysis::analyze(&img);
-        let guided = ps_core::noise_net::guided_denoise(&img, 1.0).is_some();
+        let guided = ps_core::noise_net::guided_denoise(&img, strength).is_some();
         let (l0, l1) = (ml::lum(&img), ml::lum(&cleaned));
         let disk: Vec<usize> = match a.disk {
             Some(d) => (0..l0.len()).filter(|&i| ((i % img.width()) as f32 - d.cx).hypot((i / img.width()) as f32 - d.cy) < 0.8 * d.radius).collect(),

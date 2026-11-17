@@ -55,7 +55,10 @@ fn main() {
         };
         let id = format!("r{n:02}");
         for (strength, levels) in STRENGTHS {
-            let cleaned = if strength > 0.0 { denoise(&img, &NoiseParams { method: NoiseMethod::Learned, strength, detail: 0.3, chroma: levels, sky: 0.8 }) } else { img.clone() };
+            // NOISE_METHOD=guided uses the noise network's reduction (it handles colour itself).
+            let guided = std::env::var("NOISE_METHOD").as_deref() == Ok("guided");
+            let method = if guided { NoiseMethod::Guided } else { NoiseMethod::Learned };
+            let cleaned = if strength > 0.0 { denoise(&img, &NoiseParams { method, strength, detail: 0.3, chroma: if guided { 0 } else { levels }, sky: 0.8 }) } else { img.clone() };
             let subject = ps_core::mask::subject_and_moons(&cleaned);
             let with_net = ps_core::smart::sharpen(&cleaned, None, &rete, Some(&subject));
             let with_app = ps_core::smart::sharpen(&cleaned, None, &app, Some(&subject));
