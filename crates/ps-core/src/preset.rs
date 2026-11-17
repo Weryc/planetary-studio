@@ -110,7 +110,7 @@ fn moffat_beta(kind: ImageKind, analysis: &Analysis) -> f32 {
 }
 
 /// Noisier data → stronger denoising and damping; very clean data → lighter.
-/// The automatic noise reduction. With the learned network in this build, that: it measures the
+/// The automatic noise reduction. With the noise network in this build, that: it measures the
 /// noise itself, so only the chosen strength scales it (a little gentler on Saturn's thin ring
 /// divisions), and a tenth of the fine texture goes back so surfaces don't look waxy. Without
 /// it, the classic method for the kind, scaled by the signal-to-noise ratio.
@@ -118,7 +118,7 @@ fn auto_noise(kind: ImageKind, analysis: &Analysis, cleaning: f32) -> NoiseParam
     let b = base(kind).noise;
     if crate::denoise_net::available() {
         let strength = if kind == ImageKind::Saturn { 0.9 } else { 1.0 };
-        NoiseParams { method: NoiseMethod::Learned, strength: strength * cleaning, detail: 0.1, ..b }
+        NoiseParams { method: NoiseMethod::Guided, strength: strength * cleaning, detail: 0.1, ..b }
     } else {
         NoiseParams { strength: b.strength * noise_factor(analysis) * cleaning, ..b }
     }

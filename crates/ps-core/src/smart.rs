@@ -80,12 +80,11 @@ pub struct SmartParams {
 /// there is none).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SmartCurve {
+    /// Earlier versions also offered curves for poor and good seeing, surfaces and smooth
+    /// globes (dropped); projects saved with any of them open with this one.
     #[default]
+    #[serde(alias = "PoorSeeing", alias = "GoodSeeing", alias = "Surface", alias = "SmoothGlobe")]
     Standard,
-    PoorSeeing,
-    GoodSeeing,
-    Surface,
-    SmoothGlobe,
     /// Earlier versions also had a model trained on the stacks themselves (dropped: its truth
     /// wasn't sharp); projects saved with either open with this one.
     #[serde(alias = "LearnedRef")]
@@ -95,27 +94,19 @@ pub enum SmartCurve {
 }
 
 impl SmartCurve {
-    pub const ALL: [SmartCurve; 5] = [Self::Standard, Self::PoorSeeing, Self::GoodSeeing, Self::Surface, Self::SmoothGlobe];
+    pub const ALL: [SmartCurve; 1] = [Self::Standard];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Standard => "Standard",
-            Self::PoorSeeing => tl("Seeing scarso"),
-            Self::GoodSeeing => tl("Seeing ottimo"),
-            Self::Surface => tl("Luna e superfici"),
-            Self::SmoothGlobe => tl("Globi lisci"),
             Self::Learned => tl("Appresa dai riferimenti"),
-            Self::Network => tl("Rete per il soggetto (nuova)"),
+            Self::Network => tl("Appresa (Giove)"),
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
             Self::Standard => tl("Come BlurXTerminator sulle immagini planetarie: il massimo sul dettaglio più fine presente, un po' anche sulle strutture grandi."),
-            Self::PoorSeeing => tl("Sposta la spinta sulle strutture più grandi (bande, macchie) e lascia stare il dettaglio più fine, che con seeing scarso è soprattutto rumore."),
-            Self::GoodSeeing => tl("Spinge fino al dettaglio più fine e un po' oltre, tocca meno le strutture grandi. Per immagini nitide e poco rumorose."),
-            Self::Surface => tl("Spinta larga su tutte le dimensioni: crateri piccoli e grandi, montagne, bordi di ombre. Per la Luna e le riprese ravvicinate."),
-            Self::SmoothGlobe => tl("Più dolce sul dettaglio finissimo, dove un globo liscio (Saturno, Urano, Venere) mostra solo grana: valorizza bande e divisioni senza macchiettare."),
             Self::Learned => tl("Forma e forza scelte da un piccolo modello che ha imparato da immagini nitide di Hubble, Cassini, SDO e della NASA, riportate a dimensioni amatoriali e viste attraverso un seeing simulato come in uno stack vero: centinaia di fotogrammi con turbolenza, i migliori allineati e sommati. Decide solo le impostazioni: i pixel li calcolano sempre le wavelet."),
             Self::Network => tl("Curva prevista da una piccola rete addestrata per questo soggetto (per ora Giove) su stack simulati: centinaia di fotogrammi attraverso seeing e sensore, allineati e sommati davvero, confrontati con l'originale nitido. Guarda lo spettro del disco e il rumore nel cielo (se il cielo è stato tagliato a nero lo ignora) e sceglie quanto spingere ogni dimensione di dettaglio. Nitidezza e forma della risposta restano regolabili."),
         }
@@ -126,10 +117,6 @@ impl SmartCurve {
         match self {
             // BlurXTerminator's response on real stacks (median of eight, see the module notes).
             Self::Standard => &[(0.10, 0.0), (0.18, 0.10), (0.25, 0.21), (0.35, 0.35), (0.5, 0.55), (0.7, 0.80), (0.85, 0.93), (1.0, 1.0), (1.15, 0.91), (1.3, 0.76), (1.5, 0.48), (1.7, 0.24), (2.0, 0.03), (2.2, 0.0)],
-            Self::PoorSeeing => &[(0.08, 0.0), (0.15, 0.15), (0.25, 0.35), (0.35, 0.52), (0.5, 0.76), (0.7, 1.0), (0.85, 0.95), (1.0, 0.8), (1.15, 0.55), (1.3, 0.3), (1.5, 0.1), (1.7, 0.0)],
-            Self::GoodSeeing => &[(0.15, 0.0), (0.25, 0.12), (0.35, 0.22), (0.5, 0.4), (0.7, 0.65), (0.85, 0.85), (1.0, 0.97), (1.15, 1.0), (1.3, 0.9), (1.5, 0.68), (1.7, 0.42), (2.0, 0.15), (2.3, 0.0)],
-            Self::Surface => &[(0.07, 0.0), (0.15, 0.22), (0.25, 0.4), (0.35, 0.55), (0.5, 0.72), (0.7, 0.88), (0.85, 0.97), (1.0, 1.0), (1.15, 0.92), (1.3, 0.75), (1.5, 0.45), (1.7, 0.2), (2.0, 0.02), (2.2, 0.0)],
-            Self::SmoothGlobe => &[(0.10, 0.0), (0.18, 0.15), (0.25, 0.3), (0.35, 0.48), (0.5, 0.72), (0.7, 0.93), (0.85, 1.0), (1.0, 0.92), (1.15, 0.72), (1.3, 0.48), (1.5, 0.22), (1.7, 0.05), (1.9, 0.0)],
             Self::Learned | Self::Network => Self::Standard.table(),
         }
     }
@@ -706,7 +693,7 @@ mod tests {
     }
 
     /// Every curve peaks near the cut-off at the chosen height, leaves coarse structure gently
-    /// boosted and cleans the grain; "Seeing scarso" favours coarser detail than "Seeing ottimo".
+    /// boosted and cleans the grain.
     #[test]
     fn the_curves_are_sane() {
         let c = 0.15;
@@ -717,9 +704,6 @@ mod tests {
             assert!(p.target(0.25 * c, c) >= 1.0 && p.target(0.25 * c, c) < 4.0, "{curve:?} coarse {}", p.target(0.25 * c, c));
             assert!(p.target(0.49, c) < 0.6, "{curve:?} grain {}", p.target(0.49, c));
         }
-        let at = |curve, f: f32| SmartParams { strength: 1.0, curve, ..Default::default() }.target(f, c);
-        assert!(at(SmartCurve::PoorSeeing, 0.5 * c) > at(SmartCurve::GoodSeeing, 0.5 * c));
-        assert!(at(SmartCurve::PoorSeeing, 1.4 * c) < at(SmartCurve::GoodSeeing, 1.4 * c));
     }
 
     /// On a disk against black sky: the edge protection holds back at the limb only, "Segui le

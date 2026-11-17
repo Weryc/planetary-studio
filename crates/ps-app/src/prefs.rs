@@ -138,8 +138,6 @@ fn yes() -> bool {
 pub enum Group {
     Favorites,
     Sharpness,
-    /// Fixing what the processing left behind (rings, halos).
-    Corrections,
     Noise,
     Tone,
     Color,
@@ -155,8 +153,7 @@ impl Group {
         match self {
             Group::Favorites => "Preferiti",
             Group::Sharpness => "Nitidezza",
-            Group::Corrections => "Correzione artefatti",
-            Group::Noise => "Rumore",
+            Group::Noise => "Rumore e artefatti",
             Group::Tone => "Curve e livelli",
             Group::Color => "Colore",
             Group::Regions => "Maschere",
@@ -170,8 +167,7 @@ impl Group {
         match self {
             Group::Favorites => tl("Preferiti"),
             Group::Sharpness => tl("Nitidezza"),
-            Group::Corrections => tl("Correzione artefatti"),
-            Group::Noise => tl("Rumore"),
+            Group::Noise => tl("Rumore e artefatti"),
             Group::Tone => tl("Curve e livelli"),
             Group::Color => tl("Colore"),
             Group::Regions => tl("Maschere"),
@@ -184,7 +180,6 @@ impl Group {
         match self {
             Group::Favorites => ICON_STAR,
             Group::Sharpness => ICON_DEBLUR,
-            Group::Corrections => ICON_HEALING,
             Group::Noise => ICON_GRAIN,
             Group::Tone => ICON_SHOW_CHART,
             Group::Color => ICON_PALETTE,
@@ -197,8 +192,7 @@ impl Group {
     fn of(stage: Stage) -> Group {
         match stage {
             Stage::Bxt | Stage::Deconv | Stage::Wavelet | Stage::Smart | Stage::Contrast => Group::Sharpness,
-            Stage::Dering => Group::Corrections,
-            Stage::Denoise => Group::Noise,
+            Stage::Dering | Stage::Denoise => Group::Noise,
             Stage::Tone | Stage::Curves => Group::Tone,
             Stage::Align | Stage::PhotoColor | Stage::Color | Stage::Mineral | Stage::SunColor => Group::Color,
             Stage::Rings | Stage::Moons | Stage::Layers => Group::Regions,
@@ -207,7 +201,7 @@ impl Group {
 }
 
 /// Processing order: sharpen, clean, then tone and colour, then local work.
-pub const GROUP_ORDER: [Group; 6] = [Group::Sharpness, Group::Corrections, Group::Noise, Group::Tone, Group::Color, Group::Regions];
+pub const GROUP_ORDER: [Group; 5] = [Group::Sharpness, Group::Noise, Group::Tone, Group::Color, Group::Regions];
 
 /// Whether a module makes sense for this image.
 pub fn relevant(stage: Stage, kind: ImageKind, mono: bool) -> bool {
@@ -633,15 +627,24 @@ mod tests {
 
     #[test]
     fn tab_names_are_translated_but_the_saved_key_is_not() {
-        let all = [Group::Favorites, Group::Sharpness, Group::Corrections, Group::Noise, Group::Tone, Group::Color, Group::Regions, Group::Identify, Group::Export];
+        let all = [Group::Favorites, Group::Sharpness, Group::Noise, Group::Tone, Group::Color, Group::Regions, Group::Identify, Group::Export];
         ps_core::i18n::with_lang(Lang::En, || {
             for g in all {
                 assert_eq!(g.label(), ps_core::i18n::tl(g.name()), "{:?} label matches its key's translation", g);
                 assert_ne!(g.label(), "", "{g:?}");
             }
-            assert_eq!(Group::Corrections.label(), "Artefact correction");
+            assert_eq!(Group::Noise.label(), "Noise and artefacts");
             assert_eq!(Group::Identify.name(), "Identifica e annota");
         });
+    }
+
+    /// Projects saved with the curves that were dropped open with the standard one.
+    #[test]
+    fn dropped_sharpening_curves_read_as_standard() {
+        for name in ["PoorSeeing", "GoodSeeing", "Surface", "SmoothGlobe", "Standard"] {
+            let curve: ps_core::smart::SmartCurve = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(curve, ps_core::smart::SmartCurve::Standard, "{name}");
+        }
     }
 
     /// Jupiter's photometric colour exists only for a colour picture whose subject is Jupiter.

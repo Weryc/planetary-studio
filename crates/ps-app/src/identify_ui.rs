@@ -84,6 +84,11 @@ pub struct IdentifyState {
     fit_upright: bool,
     /// The fit asked to straighten: taken by the app, which turns the image.
     upright_pending: Option<(bool, f32)>,
+    /// The time slider: minutes from `scrub_base`, the time the slider started from, and the
+    /// time it last set (a different time, from the calendar or a fit, starts it over).
+    scrub_min: f32,
+    scrub_base: Option<Moment>,
+    scrub_set: Option<Moment>,
     /// The user's choices, over what the file says.
     body: Option<Body>,
     time: Option<Moment>,
@@ -106,7 +111,7 @@ pub struct IdentifyState {
 
 impl Default for IdentifyState {
     fn default() -> Self {
-        Self { identify_collapsed: false, annotate_collapsed: false, annotate: false, active: false, open: false, utc: true, zone_auto: true, offset_min: 0, zone_cache: None, zone_pending: None, fitted_path: None, fit_applied: false, fit_upright: true, upright_pending: None, body: None, time: None, manual: None, picks: [PlacePick::default(); 2], placed: None, place_error: None, awaiting: None, place_mirror: false, result: None, pending: None, fitting: None, fit_note: None, image_path: None }
+        Self { identify_collapsed: false, annotate_collapsed: false, annotate: false, active: false, open: false, utc: true, zone_auto: true, offset_min: 0, zone_cache: None, zone_pending: None, fitted_path: None, fit_applied: false, fit_upright: true, upright_pending: None, scrub_min: 0.0, scrub_base: None, scrub_set: None, body: None, time: None, manual: None, picks: [PlacePick::default(); 2], placed: None, place_error: None, awaiting: None, place_mirror: false, result: None, pending: None, fitting: None, fit_note: None, image_path: None }
     }
 }
 
@@ -450,7 +455,8 @@ impl IdentifyState {
         if self.annotate {
             return;
         }
-        let base = Color32::from_rgb((opt.colour[0] * 255.0) as u8, (opt.colour[1] * 255.0) as u8, (opt.colour[2] * 255.0) as u8);
+        let rgb = |c: [f32; 3]| Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8);
+        let (base, predicted) = (rgb(opt.colour), rgb(opt.predicted_colour));
         let font = egui::FontId::proportional(13.0);
         let shadow = Color32::from_black_alpha(200);
         let text = |at: Pos2, s: &str, colour: Color32, anchor: egui::Align2| {
@@ -467,8 +473,8 @@ impl IdentifyState {
                     if (found && !opt.moons) || (!found && !opt.predicted) {
                         continue;
                     }
-                    // A moon only predicted is dimmer, and its ring dashed.
-                    let colour = if found { base } else { base.gamma_multiply(0.7) };
+                    // A moon only predicted has its own colour, and its ring is dashed.
+                    let colour = if found { base } else { predicted };
                     let r = if opt.circles { (6.0 * zoom).clamp(7.0, 18.0) } else { 0.0 };
                     if opt.circles && found {
                         painter.circle_stroke(at, r, Stroke::new(1.5, colour));
@@ -503,84 +509,72 @@ impl IdentifyState {
         }
     }
 
-    /// What is shown over the image (names, circles, colour) and, behind the card's switch, what
-    /// is printed onto it: a title and a caption. `on`: the switch is on.
-    fn annotate_part(&mut self, ui: &mut Ui, opt: &mut LabelOptions, on: bool) {
+    /// Everything shown over the image, in one place: the names (live on screen), and, once the
+    /// card's switch is on, the caption printed onto the picture with them.
+    fn annotate_part(&mut self, ui: &mut Ui, opt: &mut LabelOptions) {
         let Some((key, _)) = &self.result else {
             note(ui, tl("Scegli l'oggetto e la data nella scheda Identificazione."));
             return;
         };
         let body = key.body;
-        // Switches in two columns.
-        let switches = |ui: &mut Ui, id: &str, items: Vec<(&mut bool, &str)>| {
-            egui::Grid::new(id).num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-                for (k, (on, text)) in items.into_iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        toggle(ui, on);
-                        ui.label(text);
-                    });
-                    if k % 2 == 1 {
-                        ui.end_row();
-                    }
-                }
-            });
-        };
+        // One list of switches, in two columns.
+        let mut items: Vec<(&mut bool, &str)> = Vec::new();
+        let LabelOptions { moons, predicted, circles, craters, seas, object, filter, time, equipment, scale, angles, compass, .. } = opt;
         if matches!(body, Body::Jupiter | Body::Saturn) {
-            switches(ui, "names-moons", vec![(&mut opt.moons, tl("Lune trovate")), (&mut opt.predicted, tl("Solo previste")), (&mut opt.circles, tl("Cerchi"))]);
+            items.extend([(moons, tl("Lune trovate")), (predicted, tl("Lune previste")), (circles, tl("Cerchi"))]);
         }
         if body == Body::Moon {
-            switches(ui, "names-moon", vec![(&mut opt.craters, tl("Crateri")), (&mut opt.seas, tl("Mari"))]);
+            items.extend([(craters, tl("Crateri")), (seas, tl("Mari"))]);
         }
-        ui.add_space(theme::space::XS);
-        colour_row(ui, tl("Colore"), &mut opt.colour);
-
-        // The caption only matters once the card's switch writes on the picture.
-        crate::panels::advanced(ui, "annotate-caption", tl("DIDASCALIA"), false, |ui| {
-            ui.add_enabled_ui(on, |ui| {
-                let field = |ui: &mut Ui, label: &str, value: &mut String, hint_text: &str, width: f32| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(label).size(theme::size::SMALL).color(TEXT_WEAK));
-                        ui.add(egui::TextEdit::singleline(value).desired_width(width).hint_text(hint_text));
-                    });
-                };
-                let full = ui.available_width();
-                field(ui, tl("Titolo (in grande)"), &mut opt.title, tl("Giove, 5 luglio 2019"), full);
-                let half = (full - 10.0) / 2.0;
-                ui.horizontal(|ui| {
-                    field(ui, tl("Autore"), &mut opt.author, tl("Nome e cognome"), half);
-                    field(ui, tl("Luogo"), &mut opt.location, tl("Città, paese"), half);
-                });
-                field(ui, tl("Nota"), &mut opt.note, tl("Elaborazione, condizioni…"), full);
-                ui.add_space(theme::space::XS);
-                ui.label(RichText::new(tl("Cosa scrivere")).size(theme::size::SMALL).color(TEXT_WEAK));
-                switches(
-                    ui,
-                    "caption-items",
-                    vec![
-                        (&mut opt.object, tl("Oggetto")),
-                        (&mut opt.filter, tl("Filtro")),
-                        (&mut opt.time, tl("Data e ora")),
-                        (&mut opt.equipment, tl("Strumento")),
-                        (&mut opt.scale, tl("Scala (″/pixel)")),
-                        (&mut opt.angles, tl("Nord e rotazione")),
-                        (&mut opt.compass, tl("Bussola")),
-                    ],
-                );
-                ui.add_space(theme::space::XS);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(tl("Posizione")).size(theme::size::SMALL).color(TEXT_WEAK));
-                    egui::ComboBox::from_id_salt("caption-corner").selected_text(opt.corner.label()).show_ui(ui, |ui| {
-                        for c in Corner::ALL {
-                            ui.selectable_value(&mut opt.corner, c, c.label());
-                        }
-                    });
-                });
-                colour_row(ui, tl("Colore del testo"), &mut opt.caption_colour);
-                ParamSlider::new(tl("Dimensione del testo"), &mut opt.size, 1.2..=5.0, 2.4).decimals(1).suffix(" %").show(ui);
-            })
-            .response
-            .on_disabled_hover_text(tl("Accendi l'interruttore della scheda per scrivere titolo e didascalia sull'immagine"));
+        items.extend([(object, tl("Oggetto")), (filter, tl("Filtro")), (time, tl("Data e ora")), (equipment, tl("Strumento")), (scale, tl("Scala (″/pixel)")), (angles, tl("Nord e rotazione")), (compass, tl("Bussola"))]);
+        ui.horizontal(|ui| {
+            ui.label(caps(tl("COSA MOSTRARE")));
+            crate::widgets::help_icon(ui, tl("I nomi si vedono sempre sull'immagine. Con l'interruttore della scheda acceso, nomi e didascalia vengono anche scritti sull'immagine (e nell'esportazione). Le lune «previste» sono quelle calcolate dove il punto luminoso non è stato trovato."));
         });
+        egui::Grid::new("annotate-items").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
+            for (k, (on, text)) in items.into_iter().enumerate() {
+                ui.horizontal(|ui| {
+                    toggle(ui, on);
+                    ui.label(text);
+                });
+                if k % 2 == 1 {
+                    ui.end_row();
+                }
+            }
+        });
+
+        ui.add_space(theme::space::S);
+        let field = |ui: &mut Ui, label: &str, value: &mut String, hint_text: &str, width: f32| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).size(theme::size::SMALL).color(TEXT_WEAK));
+                ui.add(egui::TextEdit::singleline(value).desired_width(width).hint_text(hint_text));
+            });
+        };
+        let full = ui.available_width();
+        field(ui, tl("Titolo (in grande)"), &mut opt.title, tl("Giove, 5 luglio 2019"), full);
+        let half = (full - 10.0) / 2.0;
+        ui.horizontal(|ui| {
+            field(ui, tl("Autore"), &mut opt.author, tl("Nome e cognome"), half);
+            field(ui, tl("Luogo"), &mut opt.location, tl("Città, paese"), half);
+        });
+        field(ui, tl("Nota"), &mut opt.note, tl("Elaborazione, condizioni…"), full);
+
+        ui.add_space(theme::space::S);
+        let planet = matches!(body, Body::Jupiter | Body::Saturn);
+        colour_row(ui, if planet { tl("Colore lune trovate") } else { tl("Colore nomi") }, &mut opt.colour);
+        if planet {
+            colour_row(ui, tl("Colore lune previste"), &mut opt.predicted_colour);
+        }
+        colour_row(ui, tl("Colore del testo"), &mut opt.caption_colour);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tl("Posizione")).size(theme::size::SMALL).color(TEXT_WEAK));
+            egui::ComboBox::from_id_salt("caption-corner").selected_text(opt.corner.label()).show_ui(ui, |ui| {
+                for c in Corner::ALL {
+                    ui.selectable_value(&mut opt.corner, c, c.label());
+                }
+            });
+        });
+        ParamSlider::new(tl("Dimensione del testo"), &mut opt.size, 1.2..=5.0, 2.4).decimals(1).suffix(" %").show(ui);
     }
 
     /// Close-ups of the Moon without a limb: name two craters from the list and click them.
@@ -634,16 +628,15 @@ impl IdentifyState {
     pub fn tab(&mut self, ui: &mut Ui, input: &IdentifyInput, opt: &mut LabelOptions, actions: &mut Vec<PanelAction>) {
         // Two cards like the other tabs': what the picture shows, and what is shown over it.
         let mut folded = self.identify_collapsed;
-        crate::panels::section_card(ui, ICON_TRAVEL_EXPLORE, tl("Identificazione"), &mut folded, |ui| self.identify_part(ui, input, actions));
+        crate::panels::section_card(ui, ICON_TRAVEL_EXPLORE, tl("Identificazione"), &mut folded, |ui| self.identify_part(ui, input, actions, opt));
         self.identify_collapsed = folded;
         let (mut folded, mut on) = (self.annotate_collapsed, self.annotate);
-        let was_on = on;
-        crate::panels::switch_card(ui, ICON_EDIT_NOTE, tl("Annotazione"), &mut on, &mut folded, |ui| self.annotate_part(ui, opt, was_on));
+        crate::panels::switch_card(ui, ICON_EDIT_NOTE, tl("Annotazione"), &mut on, &mut folded, |ui| self.annotate_part(ui, opt));
         (self.annotate_collapsed, self.annotate) = (folded, on);
     }
 
     /// Object, date, orientation: what puts the moons and craters on their places.
-    fn identify_part(&mut self, ui: &mut Ui, input: &IdentifyInput, actions: &mut Vec<PanelAction>) {
+    fn identify_part(&mut self, ui: &mut Ui, input: &IdentifyInput, actions: &mut Vec<PanelAction>, opt: &LabelOptions) {
         let ctx = ui.ctx().clone();
         let section = |ui: &mut Ui, title: &str| {
             ui.add_space(theme::space::M);
@@ -662,8 +655,9 @@ impl IdentifyState {
             help(ui, tl("Il soggetto ripreso: riconosciuto dal nome del file, dal log di ripresa o da com'è fatta l'immagine. Cambialo se non è giusto."));
             if matches!(body, Some(Body::Jupiter | Body::Saturn)) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("◌ {}", tl("prevista"))).size(theme::size::SMALL).color(TEXT_WEAK));
-                    ui.label(RichText::new(format!("◯ {}", tl("trovata"))).size(theme::size::SMALL).color(TEXT_WEAK));
+                    let rgb = |c: [f32; 3]| Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8);
+                    ui.label(RichText::new(format!("◌ {}", tl("prevista"))).size(theme::size::SMALL).color(rgb(opt.predicted_colour)));
+                    ui.label(RichText::new(format!("◯ {}", tl("trovata"))).size(theme::size::SMALL).color(rgb(opt.colour)));
                 });
             }
         });
@@ -746,6 +740,26 @@ impl IdentifyState {
         let zone_changed = self.utc != utc_before || self.offset_min != offset_before;
         if when != before || (zone_changed && ut_before.is_some()) {
             self.time = Some(shifted(when, -shift));
+        }
+        // A slider to move the time a little each way and watch the moons go, to see whether
+        // the evening and the moons are the right ones.
+        if known {
+            let now = self.time.or(input.time);
+            if self.scrub_set != now {
+                (self.scrub_base, self.scrub_min) = (now, 0.0);
+            }
+            if let Some(base) = self.scrub_base {
+                let before = self.scrub_min;
+                ParamSlider::new(tl("Sposta l'ora"), &mut self.scrub_min, -120.0..=120.0, 0.0)
+                    .decimals(0)
+                    .suffix(" min")
+                    .help(tl("Muove l'ora fino a due ore indietro o avanti: guarda le lune spostarsi e controlla che la serata e le lune siano quelle giuste. Doppio clic: torna all'ora di partenza"))
+                    .show(ui);
+                if self.scrub_min != before {
+                    let t = shifted(base, self.scrub_min.round() as i32);
+                    (self.time, self.scrub_set) = (Some(t), Some(t));
+                }
+            }
         }
 
         let Some((key, id)) = &self.result else {
