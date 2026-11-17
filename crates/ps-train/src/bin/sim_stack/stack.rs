@@ -200,7 +200,10 @@ pub fn stack(raws: &[Vec<u16>], order: &[usize], keep: usize, sensor: &Sensor, s
                     out
                 })
                 .collect();
-            (aligned, mean_local, i % 2)
+            // SIM_SPLIT=pairs splits by pairs of frames instead (a check that the halves' offset
+            // is random, not tied to parity).
+            let parity = if std::env::var("SIM_SPLIT").as_deref() == Ok("pairs") { (i / 2) % 2 } else { i % 2 };
+            (aligned, mean_local, parity)
         })
         .fold(zero, |mut acc, (aligned, ml, parity): (Vec<Vec<f32>>, f32, usize)| {
             for slot in [0, 1 + parity] {

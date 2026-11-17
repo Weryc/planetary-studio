@@ -2330,7 +2330,7 @@ pub fn denoise_body(ui: &mut Ui, p: &mut NoiseParams, mono: bool, why: Option<&[
             if response.clicked() {
                 p.method = NoiseMethod::Guided;
             }
-            note(ui, tl("Una rete addestrata su stack simulati di Giove e tarata su riprese vere stima quanto rumore c'è a ogni dimensione di dettaglio, nella grana e nel colore, e toglie solo quella parte. Gestisce da sola il rumore di colore. Serve un disco intero; altrimenti usa il metodo Pianeti."));
+            note(ui, tl("Una rete addestrata sul rumore vero di stack simulati di Giove, e verificata su riprese reali che non ha mai visto, stima quanto rumore c'è nella grana fine e media e nel colore, e toglie solo quella parte. Le strutture più grandi non le tocca: lì c'è la deformazione del seeing, non rumore. Serve un disco intero; altrimenti usa il metodo Pianeti."));
         });
     ui.add_space(theme::space::S);
     ui.horizontal(|ui| {

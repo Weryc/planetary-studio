@@ -971,7 +971,7 @@ pub static EN: &[(&str, &str)] = &[
     ("trovata", "found"),
     ("Rumore e artefatti", "Noise and artefacts"),
     ("Rumore", "Noise"),
-    ("Una rete addestrata su stack simulati di Giove e tarata su riprese vere stima quanto rumore c'è a ogni dimensione di dettaglio, nella grana e nel colore, e toglie solo quella parte. Gestisce da sola il rumore di colore. Serve un disco intero; altrimenti usa il metodo Pianeti.", "A network trained on simulated Jupiter stacks and calibrated on real recordings estimates how much noise there is at each size of detail, in the grain and in the colour, and removes only that share. It handles colour noise itself. It needs a whole disk; otherwise the Planets method is used."),
+    ("Una rete addestrata sul rumore vero di stack simulati di Giove, e verificata su riprese reali che non ha mai visto, stima quanto rumore c'è nella grana fine e media e nel colore, e toglie solo quella parte. Le strutture più grandi non le tocca: lì c'è la deformazione del seeing, non rumore. Serve un disco intero; altrimenti usa il metodo Pianeti.", "A network trained on the true noise of simulated Jupiter stacks, and checked on real recordings it never saw, estimates how much noise there is in the fine and medium grain and in the colour, and removes only that share. It leaves larger structures alone: there the seeing's deformation lives, not noise. It needs a whole disk; otherwise the Planetary method is used."),
     ("Altri metodi", "Other methods"),
     ("Filtri più semplici, per quando la rete non si può usare (per esempio senza un disco intero).", "Simpler filters, for when the network can't be used (for example without a whole disk)."),
     ("Rete", "Network"),

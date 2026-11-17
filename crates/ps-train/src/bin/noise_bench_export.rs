@@ -68,9 +68,14 @@ fn main() {
             std::fs::create_dir_all(&dir).unwrap();
             let crop = |img: &Image| img.crop(f.x0, f.y0, f.side, f.side);
             save(&dir, "grezza", &f.crop);
-            for (file, method) in [("app_pianeti", NoiseMethod::Planetary), ("app_appresa", NoiseMethod::Learned)] {
-                let d = denoise(&raw, &NoiseParams { method, strength: 1.0, detail: 0.3, chroma: 2, sky: 0.8 });
+            for (file, method) in [("app_pianeti", NoiseMethod::Planetary), ("app_appresa", NoiseMethod::Learned), ("app_rete", NoiseMethod::Guided)] {
+                let chroma = if method == NoiseMethod::Guided { 0 } else { 2 };
+                let d = denoise(&raw, &NoiseParams { method, strength: 1.0, detail: 0.3, chroma, sky: 0.8 });
                 save(&dir, file, &crop(&d));
+            }
+            for k in [2.0f32, 3.0] {
+                let d = denoise(&raw, &NoiseParams { method: NoiseMethod::Guided, strength: k, detail: 0.3, chroma: 0, sky: 0.8 });
+                save(&dir, &format!("app_rete{k:.0}"), &crop(&d));
             }
             let mut mask = vec![0.0f32; f.side * f.side];
             f.inside.iter().for_each(|&i| mask[i] = 1.0);

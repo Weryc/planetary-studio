@@ -21,6 +21,35 @@ fn load(p: &std::path::Path) -> Image {
     ml::load_any(p).unwrap_or_else(|| panic!("{}: illeggibile", p.display()))
 }
 
+/// `plane` moved by `d` px exactly (a phase ramp in frequency; same direction as
+/// `ps_core::align::shift`).
+fn fourier_shift(plane: &[f32], w: usize, h: usize, d: [f32; 2]) -> Vec<f32> {
+    let plan = ps_core::fft::FftConvolver::plan(w, h);
+    let mut spec = plan.forward(plane);
+    for (idx, c) in spec.iter_mut().enumerate() {
+        let (kx, ky) = (idx / h, idx % h);
+        let fy = if ky <= h / 2 { ky as f32 } else { ky as f32 - h as f32 } / h as f32;
+        let phase = std::f32::consts::TAU * (kx as f32 / w as f32 * d[0] + fy * d[1]);
+        let (sn, cs) = phase.sin_cos();
+        let (re, im) = (c.re, c.im);
+        c.re = re * cs - im * sn;
+        c.im = re * sn + im * cs;
+    }
+    plan.inverse(spec)
+}
+
+/// The stack with its sky clipped to black, as some programs leave it (a black point just above
+/// the sky's 99th percentile): the estimator also learns to do without the sky.
+fn black_sky(img: &Image, disk: Option<ps_core::analysis::Disk>) -> Image {
+    let lum = ml::lum(img);
+    let (w, h) = (img.width(), img.height());
+    let (cx, cy, r) = disk.map_or((w as f32 / 2.0, h as f32 / 2.0, 0.3 * w as f32), |d| (d.cx, d.cy, d.radius));
+    let mut sky: Vec<f32> = (0..w * h).filter(|&i| ((i % w) as f32 - cx).hypot((i / w) as f32 - cy) > 1.3 * r).map(|i| lum[i]).collect();
+    sky.sort_by(f32::total_cmp);
+    let level = sky.get(sky.len() * 99 / 100).copied().unwrap_or(0.0);
+    Image::new(w, h, img.channels().iter().map(|p| p.iter().map(|v| (v - level).max(0.0)).collect()).collect(), 16)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let out = PathBuf::from(&args[0]);
@@ -35,7 +64,14 @@ fn main() {
             continue;
         };
         let (w, h) = (full.width(), full.height());
-        let half_diff = Image::new(w, h, even.channels().iter().zip(odd.channels()).map(|(e, o)| e.iter().zip(o).map(|(a, b)| 0.5 * (a - b)).collect()).collect(), 16);
+        // The two halves can sit a few hundredths of a pixel apart (frames the stacker aligned
+        // a little wrong fall unevenly into them): that offset is not noise, and left in it
+        // would draw the planet's belts into the difference. Each half moves half of it, exactly.
+        let lum = |img: &Image| ps_core::color::working_planes(img, ps_core::color::ColorMode::Luminance).swap_remove(0);
+        let offset = ps_core::align::measure_shift(&lum(&even), &lum(&odd), w, h);
+        let move_by = |img: &Image, k: f32| -> Vec<Vec<f32>> { img.channels().iter().map(|c| fourier_shift(c, w, h, [k * offset[0], k * offset[1]])).collect() };
+        let (even_c, odd_c) = (move_by(&even, -0.5), move_by(&odd, 0.5));
+        let half_diff = Image::new(w, h, even_c.iter().zip(&odd_c).map(|(e, o)| e.iter().zip(o).map(|(a, b)| 0.5 * (a - b)).collect()).collect(), 16);
         let d = half_diff.crop(f.x0, f.y0, f.side, f.side);
         let (dl, dc) = planes(&d);
         let lum = f.power(&dl, &f.inside);
@@ -45,10 +81,18 @@ fn main() {
         });
         let meta = std::fs::read_to_string(dir.join("meta.json")).unwrap_or_else(|_| "{}".into());
         rows.push(format!(
-            "  {{\"stack\": \"{}\", \"meta\": {}, \"x\": {}, \"rumore_grana\": {}, \"rumore_colore\": {}, \"cielo\": {}, \"disco\": {:.1}}}",
+            "  {{\"stack\": \"{}\", \"scarto_px\": [{:.4},{:.4}], \"meta\": {}, \"x\": {}, \"x_nero\": {}, \"rumore_grana\": {}, \"rumore_colore\": {}, \"cielo\": {}, \"disco\": {:.1}}}",
             dir.file_name().unwrap().to_string_lossy(),
+            offset[0],
+            offset[1],
             meta.trim(),
             arr(&features(&m)),
+            {
+                let b = black_sky(&full, a.disk);
+                let mut ab = analyze(&b);
+                ab.disk = a.disk;
+                measure(&b, &ab).map_or("null".to_string(), |(mb, _)| arr(&features(&mb)))
+            },
             arr(&lum),
             chroma.as_ref().map_or("null".into(), |c| arr(c)),
             m.lum.sky.is_some(),
