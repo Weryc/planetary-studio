@@ -28,6 +28,11 @@ pub enum NoiseMethod {
     /// ([`crate::denoise_net`]): it tells noise from detail by what that detail looks like.
     /// Falls back to [`NoiseMethod::Planetary`] if this build has no weights.
     Learned,
+    /// Guided by the noise estimator ([`crate::noise_net`]): each size of detail, in brightness
+    /// and in colour, keeps the share the estimator says is not noise. Handles colour noise
+    /// itself (the colour levels are not applied on top). Falls back to
+    /// [`NoiseMethod::Learned`] without a disk to measure on.
+    Guided,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -57,6 +62,12 @@ impl Default for NoiseParams {
 }
 
 pub fn denoise(img: &Image, p: &NoiseParams) -> Image {
+    if p.method == NoiseMethod::Guided {
+        if let Some(guided) = crate::noise_net::guided_denoise(img, p.strength) {
+            return finish_guided(img, guided, p);
+        }
+        return denoise(img, &NoiseParams { method: NoiseMethod::Learned, ..p.clone() });
+    }
     let (w, h) = (img.width(), img.height());
     let y = working_planes(img, ColorMode::Luminance).swap_remove(0);
     let sigma = estimate_noise(&y, w, h).max(1e-5);
@@ -67,7 +78,7 @@ pub fn denoise(img: &Image, p: &NoiseParams) -> Image {
             let clean = crate::denoise_net::denoise(net, &y, w, h, sigma, p.strength, &|| false).expect("never cancelled");
             clean.par_iter().zip(&y).map(|(&s, &o)| s + p.detail.clamp(0.0, 1.0) * (o - s)).collect()
         }
-        (NoiseMethod::Planetary | NoiseMethod::Learned, _) => {
+        (NoiseMethod::Planetary | NoiseMethod::Learned | NoiseMethod::Guided, _) => {
             // Thresholds per scale in units of that scale's noise σ (finest first).
             let k = [2.2, 1.4, 0.7].map(|v| v * p.strength);
             let layers = k.iter().map(|&denoise| WaveletLayer { gain: 0.0, denoise, ..Default::default() }).collect();
@@ -93,6 +104,23 @@ pub fn denoise(img: &Image, p: &NoiseParams) -> Image {
 
     let merged = merge_planes(img, ColorMode::Luminance, std::slice::from_ref(&y), vec![cleaned]);
     if p.chroma > 0 && !img.is_mono() { smooth_chroma(&merged, p.chroma) } else { merged }
+}
+
+/// The guided reduction's result with the usual finishing: part of the fine detail given back
+/// (`detail`) and the sky smoothed (`sky`), on the luminance; its colour is kept as it is.
+fn finish_guided(img: &Image, guided: Image, p: &NoiseParams) -> Image {
+    let (w, h) = (img.width(), img.height());
+    let y = working_planes(img, ColorMode::Luminance).swap_remove(0);
+    let yg = working_planes(&guided, ColorMode::Luminance).swap_remove(0);
+    let mut cleaned: Vec<f32> = yg.par_iter().zip(&y).map(|(&s, &o)| s + p.detail.clamp(0.0, 1.0) * (o - s)).collect();
+    if p.sky > 0.0 {
+        let sigma = estimate_noise(&y, w, h).max(1e-5);
+        let sky_level = sky_threshold(&y, sigma);
+        let blurred = gaussian_approx(&cleaned, w, h, 3.0);
+        let weight = gaussian_approx(&y.par_iter().map(|&v| (v < sky_level) as u8 as f32).collect::<Vec<_>>(), w, h, 4.0);
+        cleaned.par_iter_mut().zip(&blurred).zip(&weight).for_each(|((c, &b), &m)| *c += p.sky * m * (b - *c));
+    }
+    merge_planes(&guided, ColorMode::Luminance, std::slice::from_ref(&yg), vec![cleaned])
 }
 
 /// A level just above the sky background: its median plus a few noise σ.

@@ -2307,7 +2307,7 @@ pub fn denoise_body(ui: &mut Ui, p: &mut NoiseParams, mono: bool, why: Option<&[
     segmented(
         ui,
         &mut p.method,
-        &[(NoiseMethod::Learned, Some(ICON_NEUROLOGY), tl("Appreso")), (NoiseMethod::Planetary, Some(ICON_PUBLIC), tl("Pianeti")), (NoiseMethod::Lunar, Some(ICON_NIGHTLIGHT), tl("Luna e Sole"))],
+        &[(NoiseMethod::Learned, Some(ICON_NEUROLOGY), tl("Appreso")), (NoiseMethod::Planetary, Some(ICON_PUBLIC), tl("Pianeti")), (NoiseMethod::Lunar, Some(ICON_NIGHTLIGHT), tl("Luna e Sole")), (NoiseMethod::Guided, Some(ICON_AUTO_AWESOME), tl("Rete del rumore"))],
     );
     hint(
         ui,
@@ -2316,13 +2316,14 @@ pub fn denoise_body(ui: &mut Ui, p: &mut NoiseParams, mono: bool, why: Option<&[
             NoiseMethod::Learned => tl("Rete addestrata su stack planetari simulati: riconosce bande, crateri e granulazione e toglie solo il rumore."),
             NoiseMethod::Planetary => tl("Wavelet multiscala: toglie la grana fine senza intaccare bande e dettagli morbidi."),
             NoiseMethod::Lunar => tl("Filtro che rispetta i bordi: pulisce le zone piatte e lascia netti crateri e granulazione."),
+            NoiseMethod::Guided => tl("Sperimentale. Una rete addestrata su stack simulati di Giove e tarata su riprese vere stima quanto rumore c'è a ogni dimensione di dettaglio, nella grana e nel colore, e toglie solo quella parte. Gestisce da sola il rumore di colore. Serve un disco intero; altrimenti usa il metodo Appreso."),
         },
     );
     ParamSlider::new(tl("Intensità"), &mut p.strength, 0.0..=3.0, 0.0).help(tl("In multipli del rumore misurato sull'immagine (1 = standard)")).show(ui);
     if p.method != NoiseMethod::Planetary {
         ParamSlider::new(tl("Dettaglio"), &mut p.detail, 0.0..=1.0, 0.3).help(tl("Quanta trama fine restituire dopo la pulizia")).show(ui);
     }
-    if !mono {
+    if !mono && p.method != NoiseMethod::Guided {
         ParamSlider::new(tl("Rumore colore"), &mut p.chroma, 0..=4, 0).decimals(0).help(tl("Pulisce le macchie di colore senza toccare la luminosità")).show(ui);
     }
     ParamSlider::new(tl("Cielo"), &mut p.sky, 0.0..=1.0, 0.0).help(tl("Pulizia extra dello sfondo nero intorno al soggetto")).show(ui);

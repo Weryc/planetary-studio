@@ -33,6 +33,8 @@ pub mod image;
 pub mod mask;
 pub mod moons;
 pub mod mosaic;
+pub mod noise_net;
+mod noise_net_data;
 pub mod photocolor;
 mod photocolor_data;
 pub mod pipeline;

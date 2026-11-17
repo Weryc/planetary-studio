@@ -101,8 +101,24 @@ fn measured_side(w: usize, h: usize, diameter: f32) -> usize {
     crate::fft::next_fast_size(((1.35 * diameter) as usize).max(192)).min(w).min(h)
 }
 
-/// Measure `img` (its analysis `a`). `None` without a disk to measure on.
-pub fn measure(img: &Image, a: &Analysis) -> Option<Measures> {
+/// The square measured on an image and where its subject and its sky are.
+pub struct Frame {
+    pub crop: Image,
+    /// Its top-left corner in the image and its side.
+    pub x0: usize,
+    pub y0: usize,
+    pub side: usize,
+    pub diameter: f32,
+    /// Pixels inside the subject, a few from its edges (the limb against the sky would weigh on
+    /// every band), and of the sky well away from it (1.5 radii) and from the square's edges.
+    pub inside: Vec<usize>,
+    pub sky: Vec<usize>,
+    /// The subject's mean luminance there: powers are relative to its square.
+    pub mean: f64,
+}
+
+/// Frame `img` (its analysis `a`) as the simulated stacks were. `None` without a disk.
+pub fn frame(img: &Image, a: &Analysis) -> Option<Frame> {
     let disk = a.disk?;
     let diameter = 2.0 * disk.radius;
     let (w, h) = (img.width(), img.height());
@@ -115,8 +131,6 @@ pub fn measure(img: &Image, a: &Analysis) -> Option<Measures> {
     let crop = img.crop(x0, y0, side, side);
     let lum = working_planes(&crop, ColorMode::Luminance).swap_remove(0);
     let (cx, cy) = (disk.cx - x0 as f32, disk.cy - y0 as f32);
-    // Inside the subject, a few pixels from its edges (the limb against the sky would weigh on
-    // every band).
     let border = 12;
     let inside_mask = crate::mask::gaussian_approx(&crate::mask::subject_and_moons(&crop), side, side, 4.0);
     let inside: Vec<usize> = (0..side * side).filter(|&i| inside_mask[i] > 0.97 && (border..side - border).contains(&(i % side)) && (border..side - border).contains(&(i / side))).collect();
@@ -127,26 +141,37 @@ pub fn measure(img: &Image, a: &Analysis) -> Option<Measures> {
     if mean <= 0.0 {
         return None;
     }
-    let b = bands(&lum, side);
-    let power = |px: &[usize]| -> Vec<f32> { b.iter().map(|band| ((px.iter().map(|&i| (band[i] as f64).powi(2)).sum::<f64>() / px.len() as f64) / mean.powi(2)).max(1e-14).log10() as f32).collect() };
-    let subject = power(&inside);
-    // The sky: well away from the disk (1.5 radii) and from the crop's edges.
-    let sky_px: Vec<usize> = (0..side * side).filter(|&i| ((i % side) as f32 - cx).hypot((i / side) as f32 - cy) > 0.75 * diameter && (16..side - 16).contains(&(i % side)) && (16..side - 16).contains(&(i / side))).collect();
-    let (sky, sky_note) = if sky_px.len() < 500 {
-        (None, Some("poco cielo attorno al disco"))
-    } else if let Some(note) = sky_without_noise(&lum, &sky_px, mean) {
-        (None, Some(note))
-    } else {
-        (Some(power(&sky_px)), None)
-    };
+    let sky: Vec<usize> = (0..side * side).filter(|&i| ((i % side) as f32 - cx).hypot((i / side) as f32 - cy) > 0.75 * diameter && (16..side - 16).contains(&(i % side)) && (16..side - 16).contains(&(i / side))).collect();
+    Some(Frame { crop, x0, y0, side, diameter, inside, sky, mean })
+}
+
+impl Frame {
+    /// Log10 power of each band of `plane` (the square's) over `px`, over the mean squared.
+    pub fn power(&self, plane: &[f32], px: &[usize]) -> Vec<f32> {
+        bands(plane, self.side).iter().map(|band| ((px.iter().map(|&i| (band[i] as f64).powi(2)).sum::<f64>() / px.len().max(1) as f64) / self.mean.powi(2)).max(1e-14).log10() as f32).collect()
+    }
+
+    /// Why the sky can't be measured, if it can't: too little of it, or its noise removed.
+    pub fn sky_problem(&self, lum: &[f32]) -> Option<&'static str> {
+        if self.sky.len() < 500 { Some("poco cielo attorno al disco") } else { sky_without_noise(lum, &self.sky, self.mean) }
+    }
+}
+
+/// Measure `img` (its analysis `a`). `None` without a disk to measure on.
+pub fn measure(img: &Image, a: &Analysis) -> Option<Measures> {
+    let f = frame(img, a)?;
+    let lum = working_planes(&f.crop, ColorMode::Luminance).swap_remove(0);
+    let subject = f.power(&lum, &f.inside);
+    let sky_note = f.sky_problem(&lum);
+    let sky = sky_note.is_none().then(|| f.power(&lum, &f.sky));
     Some(Measures {
         subject,
         sky,
         sky_note,
         cutoff: a.spectral.as_ref().map_or(0.0, |s| s.cutoff),
         edge_sigma: a.psf_sigma,
-        disk_px: diameter,
-        noise_rel: (a.noise as f64 / mean) as f32,
+        disk_px: f.diameter,
+        noise_rel: (a.noise as f64 / f.mean) as f32,
         snr: a.snr,
     })
 }

@@ -411,6 +411,8 @@ fn main() {
 
     // Outputs.
     tiff::write_f32(&run_dir.join("grezza.tif"), frame, frame, &stacked.planes).unwrap();
+    tiff::write_f32(&run_dir.join("pari.tif"), frame, frame, &stacked.halves[0]).unwrap();
+    tiff::write_f32(&run_dir.join("dispari.tif"), frame, frame, &stacked.halves[1]).unwrap();
     let example = sensor.develop(&raws[order[keep / 2]]);
     let (p_truth, p_frame, p_stack, p_diff) = (preview(&sampled, frame, frame), preview(&example, frame, frame), preview(&stacked.planes, frame, frame), preview(&diffraction, frame, frame));
     ps_io::save(&run_dir.join("grezza_anteprima.png"), &p_stack).unwrap();

@@ -15,6 +15,9 @@ const STEP: usize = 8;
 
 pub struct Stacked {
     pub planes: Vec<Vec<f32>>,
+    /// The same with the even and the odd frames only: half their difference is the stack's
+    /// random noise, as two half stacks of a real recording give it.
+    pub halves: [Vec<Vec<f32>>; 2],
     pub kept: usize,
     pub points: usize,
     /// Mean |local shift| over the alignment points (px): how much the warp did.
@@ -142,7 +145,7 @@ pub fn stack(raws: &[Vec<u16>], order: &[usize], keep: usize, sensor: &Sensor, s
     let (gw, gh) = (w.div_ceil(STEP) + 1, h.div_ceil(STEP) + 1);
     let sigma = 0.8 * AP_SPACING as f32;
     let channels = if sensor.bayer { 3 } else { 1 };
-    let zero = || (vec![vec![0.0f32; w * h]; channels], 0.0f32, 0usize);
+    let zero = || (vec![vec![vec![0.0f32; w * h]; channels]; 3], 0.0f32, [0usize; 3]);
     let (sums, local_sum, count) = kept
         .par_iter()
         .map(|&i| {
@@ -197,20 +200,27 @@ pub fn stack(raws: &[Vec<u16>], order: &[usize], keep: usize, sensor: &Sensor, s
                     out
                 })
                 .collect();
-            (aligned, mean_local)
+            (aligned, mean_local, i % 2)
         })
-        .fold(zero, |mut acc, (aligned, ml): (Vec<Vec<f32>>, f32)| {
-            for (a, p) in acc.0.iter_mut().zip(&aligned) {
-                a.iter_mut().zip(p).for_each(|(s, v)| *s += v);
+        .fold(zero, |mut acc, (aligned, ml, parity): (Vec<Vec<f32>>, f32, usize)| {
+            for slot in [0, 1 + parity] {
+                for (a, p) in acc.0[slot].iter_mut().zip(&aligned) {
+                    a.iter_mut().zip(p).for_each(|(s, v)| *s += v);
+                }
+                acc.2[slot] += 1;
             }
-            (acc.0, acc.1 + ml, acc.2 + 1)
+            (acc.0, acc.1 + ml, acc.2)
         })
         .reduce(zero, |mut a, b| {
-            for (x, y) in a.0.iter_mut().zip(&b.0) {
-                x.iter_mut().zip(y).for_each(|(s, v)| *s += v);
+            for slot in 0..3 {
+                for (x, y) in a.0[slot].iter_mut().zip(&b.0[slot]) {
+                    x.iter_mut().zip(y).for_each(|(s, v)| *s += v);
+                }
+                a.2[slot] += b.2[slot];
             }
-            (a.0, a.1 + b.1, a.2 + b.2)
+            (a.0, a.1 + b.1, a.2)
         });
-    let planes = sums.into_iter().map(|p| p.into_iter().map(|v| v / count as f32).collect()).collect();
-    Stacked { planes, kept: count, points: points.len(), mean_local: local_sum / count as f32 }
+    let mut stacks: Vec<Vec<Vec<f32>>> = sums.into_iter().zip(count).map(|(p, n)| p.into_iter().map(|c| c.into_iter().map(|v| v / n.max(1) as f32).collect()).collect()).collect();
+    let (odd, even, planes) = (stacks.pop().unwrap(), stacks.pop().unwrap(), stacks.pop().unwrap());
+    Stacked { planes, halves: [even, odd], kept: count[0], points: points.len(), mean_local: local_sum / count[0] as f32 }
 }
