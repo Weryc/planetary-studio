@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod datetime;
 mod history;
 mod annotate;
 mod identify_ui;

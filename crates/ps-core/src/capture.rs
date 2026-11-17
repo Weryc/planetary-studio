@@ -157,8 +157,8 @@ pub fn from_name(stem: &str) -> CaptureInfo {
     let mut info = CaptureInfo::default();
     let words: Vec<&str> = stem.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
     // Letters only: `giove0008`.
-    info.body = stem.split(|c: char| !c.is_ascii_alphabetic()).find_map(Body::from_word);
-    info.time = iso_time(stem).or_else(|| short_time(stem));
+    info.body = body_in(stem);
+    info.time = iso_time(stem).or_else(|| short_time(stem)).or_else(|| loose_time(stem));
     // FireCapture: date-time_tenth-observer-FILTER-object.
     let dashed: Vec<&str> = stem.split('-').collect();
     if iso_time(stem).is_some() && dashed.len() >= 6 && is_filter(dashed[dashed.len() - 2].split('_').next().unwrap_or("")) {
@@ -182,6 +182,33 @@ pub fn from_name(stem: &str) -> CaptureInfo {
         }
     }
     info
+}
+
+/// The subject a name speaks of: a whole word (`Jup`, `giove`), else a long name inside a word
+/// (`Jupiter2026`, `MyJupiterRun`).
+pub fn body_in(text: &str) -> Option<Body> {
+    let words: Vec<&str> = text.split(|c: char| !c.is_ascii_alphabetic()).filter(|w| !w.is_empty()).collect();
+    if let Some(b) = words.iter().find_map(|w| Body::from_word(w)) {
+        return Some(b);
+    }
+    const LONG: [(&str, Body); 14] = [
+        ("jupiter", Body::Jupiter),
+        ("giove", Body::Jupiter),
+        ("saturn", Body::Saturn),
+        ("mercury", Body::Mercury),
+        ("mercurio", Body::Mercury),
+        ("venus", Body::Venus),
+        ("venere", Body::Venus),
+        ("marte", Body::Mars),
+        ("uranus", Body::Uranus),
+        ("urano", Body::Uranus),
+        ("neptune", Body::Neptune),
+        ("nettuno", Body::Neptune),
+        ("moon", Body::Moon),
+        ("luna", Body::Moon),
+    ];
+    let lower = text.to_ascii_lowercase();
+    LONG.iter().find(|(n, _)| lower.contains(n)).map(|(_, b)| *b)
 }
 
 /// `yyyy-mm-dd-hhmm[_t]` or `yyyy-mm-dd_hh-mm-ss` at the start of the name.
@@ -227,6 +254,174 @@ fn short_time(s: &str) -> Option<Moment> {
     None
 }
 
+
+/// A date written some other way, anywhere in the name: `20260829_201530`, `2026.08.29 20.15`,
+/// `29-08-2026_2015`, `2026-08-29T20:15:30`. The time is optional (midnight when missing).
+fn loose_time(s: &str) -> Option<Moment> {
+    let b = s.as_bytes();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            runs.push((start, i));
+        } else {
+            i += 1;
+        }
+    }
+    let text = |k: usize| &s[runs[k].0..runs[k].1];
+    let num = |k: usize| text(k).parse::<u32>().ok();
+    let year_ok = |y: u32| (1990..=2100).contains(&y);
+    // The one character between run `k` and the next.
+    let sep = |k: usize| -> Option<u8> { (k + 1 < runs.len() && runs[k + 1].0 - runs[k].1 == 1).then(|| b[runs[k].1]) };
+    let date_sep = |c: u8| matches!(c, b'-' | b'_' | b'.' | b'/' | b' ');
+    // hhmm, hhmmss or hh mm [ss] from run `k` on.
+    let time_at = |k: usize| -> Option<(u32, u32, f32)> {
+        if k >= runs.len() {
+            return None;
+        }
+        let t = match text(k).len() {
+            6 => Some((num(k)? / 10_000, num(k)? / 100 % 100, (num(k)? % 100) as f32)),
+            4 => Some((num(k)? / 100, num(k)? % 100, 0.0)),
+            2 if k + 1 < runs.len() && text(k + 1).len() == 2 && sep(k) == sep(k).filter(|c| matches!(c, b'-' | b'_' | b'.' | b':')) && sep(k).is_some() => {
+                let sec = if k + 2 < runs.len() && text(k + 2).len() == 2 && sep(k + 1) == sep(k) { num(k + 2)? as f32 } else { 0.0 };
+                Some((num(k)?, num(k + 1)?, sec))
+            }
+            _ => None,
+        }?;
+        (t.0 < 24 && t.1 < 60 && t.2 < 61.0).then_some(t)
+    };
+    for k in 0..runs.len() {
+        let len = text(k).len();
+        // (year, month, day, index of the run after the date)
+        let date: Option<(u32, u32, u32, usize)> = if len == 8 {
+            let v = num(k)?;
+            let (a, b2, c) = (v / 10_000, v / 100 % 100, v % 100);
+            if year_ok(a) { Some((a, b2, c, k + 1)) } else if year_ok(c) { Some((c, b2, a, k + 1)) } else { None }
+        } else if len == 4 && k + 2 < runs.len() && text(k + 1).len() == 2 && text(k + 2).len() == 2 && sep(k).is_some_and(date_sep) && sep(k) == sep(k + 1) {
+            Some((num(k)?, num(k + 1)?, num(k + 2)?, k + 3)).filter(|d| year_ok(d.0))
+        } else if len == 2 && k + 2 < runs.len() && text(k + 1).len() == 2 && text(k + 2).len() == 4 && sep(k).is_some_and(date_sep) && sep(k) == sep(k + 1) {
+            Some((num(k + 2)?, num(k + 1)?, num(k)?, k + 3)).filter(|d| year_ok(d.0))
+        } else {
+            None
+        };
+        let Some((year, month, day, next)) = date else { continue };
+        let mut m = Moment { year: year as i32, month, day, hour: 0, minute: 0, second: 0.0 };
+        if !m.valid() {
+            continue;
+        }
+        // The time follows after one separator (`_`, `-`, space, `T`).
+        if next > 0 && next < runs.len() && runs[next].0 - runs[next - 1].1 == 1 && let Some((h, mi, sec)) = time_at(next) {
+            (m.hour, m.minute, m.second) = (h, mi, sec);
+        }
+        return Some(m);
+    }
+    None
+}
+
+/// What a capture file's own header says: a SER file's header (camera, telescope, the UT of the
+/// first frame) or a FITS header (`DATE-OBS`, `OBJECT`, `INSTRUME`, `TELESCOP`, `FILTER`).
+pub fn from_header(path: &std::path::Path) -> Option<CaptureInfo> {
+    use std::io::Read;
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let limit = match ext.as_str() {
+        "ser" => 178,
+        "fit" | "fits" | "fts" => 28_800,
+        _ => return None,
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).ok()?.take(limit).read_to_end(&mut bytes).ok()?;
+    if ext == "ser" { from_ser_header(&bytes) } else { from_fits_header(&bytes) }
+}
+
+fn from_ser_header(h: &[u8]) -> Option<CaptureInfo> {
+    if h.len() < 178 || !h.starts_with(b"LUCAM-RECORDER") {
+        return None;
+    }
+    let text = |r: std::ops::Range<usize>| {
+        let t = String::from_utf8_lossy(&h[r]).trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string();
+        Some(t).filter(|t| !t.is_empty())
+    };
+    let mut info = CaptureInfo { camera: text(82..122), telescope: text(122..162), ..Default::default() };
+    // .NET ticks (100 ns since 0001-01-01) in UT; a header written without a clock holds zero.
+    let ticks = u64::from_le_bytes(h[170..178].try_into().ok()?);
+    let unix = (ticks / 10_000_000) as i64 - 62_135_596_800;
+    if unix > 631_152_000 {
+        let jd = 2_440_587.5 + unix as f64 / 86_400.0;
+        let mut m = Moment::from_julian(jd);
+        m.second = (unix.rem_euclid(60)) as f32;
+        info.time = Some(m).filter(Moment::valid);
+    }
+    Some(info)
+}
+
+fn from_fits_header(bytes: &[u8]) -> Option<CaptureInfo> {
+    if !bytes.starts_with(b"SIMPLE") {
+        return None;
+    }
+    let mut info = CaptureInfo::default();
+    for card in bytes.chunks(80) {
+        let Ok(text) = std::str::from_utf8(card) else { break };
+        if text.starts_with("END") && text[3..].trim().is_empty() {
+            break;
+        }
+        if text.get(8..10) != Some("= ") {
+            continue;
+        }
+        let key = text[..8].trim();
+        let value = text[10..].split('/').next().unwrap_or("").trim().trim_matches('\'').trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        match key {
+            "DATE-OBS" if info.time.is_none() => info.time = iso_datetime(&value),
+            "DATE-AVG" => info.time = iso_datetime(&value).or(info.time),
+            "OBJECT" => info.body = body_in(&value),
+            "INSTRUME" | "CAMERA" => info.camera = Some(value),
+            "TELESCOP" => info.telescope = Some(value),
+            "FILTER" => info.filter = Some(value),
+            _ => {}
+        }
+    }
+    Some(info)
+}
+
+/// `2026-08-29T20:15:30.5` (a FITS or ISO 8601 stamp, UT).
+fn iso_datetime(v: &str) -> Option<Moment> {
+    let (date, time) = v.split_once(['T', ' ']).unwrap_or((v, ""));
+    let d: Vec<u32> = date.split('-').filter_map(|p| p.parse().ok()).collect();
+    if d.len() != 3 {
+        return None;
+    }
+    let t: Vec<&str> = time.trim_end_matches('Z').split(':').collect();
+    let part = |k: usize| t.get(k).and_then(|p| p.parse::<f32>().ok()).unwrap_or(0.0);
+    let m = Moment { year: d[0] as i32, month: d[1], day: d[2], hour: part(0) as u32, minute: part(1) as u32, second: part(2) };
+    m.valid().then_some(m)
+}
+
+/// Capture files beside `image` whose own header holds the capture's data: the image itself when
+/// it is a FITS, and a SER video whose name the image's name starts with.
+pub fn headers_beside(image: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = vec![image.to_path_buf()];
+    let (Some(dir), Some(stem)) = (image.parent(), image.file_stem().and_then(|s| s.to_str())) else { return found };
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut sers: Vec<(usize, std::path::PathBuf)> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("ser")))
+            .filter_map(|p| {
+                let base = p.file_stem()?.to_str()?.to_string();
+                (base.len() >= 8 && stem.starts_with(&base)).then_some((base.len(), p))
+            })
+            .collect();
+        sers.sort_by_key(|f| std::cmp::Reverse(f.0));
+        found.extend(sers.into_iter().map(|(_, p)| p));
+    }
+    found
+}
+
 /// What a capture log says.
 pub fn from_log(text: &str) -> CaptureInfo {
     let mut info = CaptureInfo::default();
@@ -256,7 +451,7 @@ pub fn from_log(text: &str) -> CaptureInfo {
     info.arcsec_per_px = get(&["resolution", "image scale", "pixel scale", "scale"]).and_then(|v| number(&v)).filter(|&s| s > 0.0 && s < 100.0);
     info.diameter_arcsec = get(&["diameter", "diametro"]).and_then(|v| number(&v)).filter(|&d| d > 0.0);
     info.binning = get(&["binning", "bin"]).and_then(|v| if v.eq_ignore_ascii_case("no") || v.eq_ignore_ascii_case("off") { Some(1.0) } else { number(&v) }).map(|b| b.max(1.0) as u32);
-    info.body = get(&["profile", "object", "target", "oggetto"]).and_then(|v| v.split(|c: char| !c.is_ascii_alphabetic()).find_map(Body::from_word));
+    info.body = get(&["profile", "object", "target", "oggetto"]).and_then(|v| body_in(&v));
     info.drizzle = pairs.iter().find(|(k, _)| k.contains("drizzle")).and_then(|(_, v)| {
         if v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("no") {
             return Some(1.0);
@@ -380,6 +575,43 @@ mod tests {
         assert_eq!(from_log("Drizzle: 1.5x\nFrames: 500").drizzle, Some(1.5));
         assert_eq!(from_log("Drizzle=150%").drizzle, Some(1.5));
         assert_eq!(from_name("capture_AS_P20_Driz150").drizzle, Some(1.5));
+    }
+
+
+    #[test]
+    fn dates_in_other_formats() {
+        let t = |s: &str| from_name(s).time.map(|t| (t.year, t.month, t.day, t.hour, t.minute, t.second as u32));
+        assert_eq!(t("Jupiter_20260829_201530"), Some((2026, 8, 29, 20, 15, 30)));
+        assert_eq!(t("giove 2026.08.29 20.15.30 stack"), Some((2026, 8, 29, 20, 15, 30)));
+        assert_eq!(t("Saturno_29-08-2026_2015"), Some((2026, 8, 29, 20, 15, 0)));
+        assert_eq!(t("capture-2026-08-29T20:15:30"), Some((2026, 8, 29, 20, 15, 30)));
+        assert_eq!(t("Moon_20260829"), Some((2026, 8, 29, 0, 0, 0)));
+        assert_eq!(t("Jupiter_AS_P20_lapl4_ap116"), None);
+        assert_eq!(from_name("MyJupiterRun").body, Some(Body::Jupiter));
+        assert_eq!(from_name("Giove_20260829_201530").body, Some(Body::Jupiter));
+    }
+
+    #[test]
+    fn headers_of_ser_and_fits() {
+        let mut ser = vec![0u8; 178];
+        ser[..14].copy_from_slice(b"LUCAM-RECORDER");
+        ser[82..92].copy_from_slice(b"ASI462MC  ");
+        // 2026-08-29 20:15:30 UT in .NET ticks.
+        let unix: i64 = 1_788_034_530;
+        let ticks = ((unix + 62_135_596_800) as u64) * 10_000_000;
+        ser[170..178].copy_from_slice(&ticks.to_le_bytes());
+        let i = from_ser_header(&ser).unwrap();
+        assert_eq!(i.camera.as_deref(), Some("ASI462MC"));
+        let t = i.time.unwrap();
+        assert_eq!((t.year, t.month, t.day, t.hour, t.minute, t.second as u32), (2026, 8, 29, 20, 15, 30));
+        let mut fits = String::new();
+        for card in ["SIMPLE  =                    T", "DATE-OBS= '2026-08-29T20:15:30.250' / start", "OBJECT  = 'Jupiter '", "INSTRUME= 'ZWO ASI224MC'", "END"] {
+            fits.push_str(&format!("{card:<80}"));
+        }
+        let i = from_fits_header(fits.as_bytes()).unwrap();
+        assert_eq!(i.body, Some(Body::Jupiter));
+        assert_eq!(i.camera.as_deref(), Some("ZWO ASI224MC"));
+        assert_eq!(i.time.map(|t| (t.day, t.hour, t.minute)), Some((29, 20, 15)));
     }
 
     #[test]

@@ -160,12 +160,16 @@ fn identify_input(doc: &Document) -> crate::identify_ui::IdentifyInput<'_> {
         source_gen: doc.source_gen,
         body,
         time: doc.capture.info.time,
-        time_from: if doc.capture.log.is_some() { tl("dal log di ripresa") } else { tl("dal nome del file") },
+        time_from: doc.capture.time_from,
         filter: doc.capture.info.filter.clone(),
-        equipment: match (&doc.capture.info.telescope, &doc.capture.info.camera) {
-            (Some(t), Some(c)) => Some(format!("{t} · {c}")),
-            (Some(x), None) | (None, Some(x)) => Some(x.clone()),
-            _ => None,
+        // The instrument chosen in the top bar; the capture's own words when none is.
+        equipment: {
+            let short = |name: &str| name.split(" (").next().unwrap_or(name).to_string();
+            match (doc.setup.telescope.as_ref().map(|t| short(&t.name)).or_else(|| doc.capture.info.telescope.clone()), doc.setup.camera.as_ref().map(|c| short(&c.name)).or_else(|| doc.capture.info.camera.clone())) {
+                (Some(t), Some(c)) => Some(format!("{t} · {c}")),
+                (Some(x), None) | (None, Some(x)) => Some(x),
+                _ => None,
+            }
         },
     }
 }

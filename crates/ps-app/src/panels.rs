@@ -406,11 +406,20 @@ pub fn section_card(ui: &mut Ui, icon: MaterialIcon, title: &str, collapsed: &mu
     card(ui, icon, title, CardStyle::Main, None, false, collapsed, StageStatus::default(), None, body);
 }
 
+/// A section card with the on/off switch on the right, like the module cards', whose body stays
+/// usable while it is off (the switch only turns its effect on the image on and off).
+pub fn switch_card(ui: &mut Ui, icon: MaterialIcon, title: &str, on: &mut bool, collapsed: &mut bool, body: impl FnOnce(&mut Ui)) {
+    let active = *on;
+    card(ui, icon, title, CardStyle::Switch, Some(on), active, collapsed, StageStatus::default(), None, body);
+}
+
 /// How a card looks: a module card, the one to reach for first (highlighted, with a badge), or
 /// a section inside a layer.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CardStyle {
     Main,
+    /// Like `Main`, with a switch whose off state leaves the body usable.
+    Switch,
     Featured,
     Nested,
 }
@@ -443,7 +452,7 @@ fn card(
     };
     let frame = match style {
         CardStyle::Nested => egui::Frame::new().fill(BG).corner_radius(CornerRadius::same(theme::radius::L)).inner_margin(egui::Margin::same(8)),
-        CardStyle::Main => theme::card().inner_margin(egui::Margin::symmetric(12, 6)),
+        CardStyle::Main | CardStyle::Switch => theme::card().inner_margin(egui::Margin::symmetric(12, 6)),
         // Tinted with the accent, so it stands out among the cards.
         CardStyle::Featured => theme::card().fill(theme::lerp_color(theme::SURFACE, ACCENT, 0.07)).inner_margin(egui::Margin::symmetric(12, 6)),
     };
@@ -537,7 +546,7 @@ fn card(
         }
         if !*collapsed {
             ui.add_space(if nested { theme::space::S } else { theme::space::M });
-            ui.add_enabled_ui(on, body);
+            ui.add_enabled_ui(on || style == CardStyle::Switch, body);
         }
     });
     if !nested && !was_collapsed && !*collapsed {

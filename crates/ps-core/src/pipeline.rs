@@ -339,12 +339,19 @@ pub struct Aux<'a> {
 /// Premultiplied red, green, blue and coverage planes of a layer of marks, at the image's size.
 pub type OverlayPlanes = [(Arc<Vec<f32>>, u64); 4];
 
-/// `img` with the marks laid over it: `out = img · (1 − coverage) + colour`.
+/// `img` with the marks laid over it: `out = img · (1 − coverage) + colour`. A coloured layer
+/// over a mono picture makes it RGB (otherwise the colour would be averaged to grey).
 pub fn apply_overlay(img: &Image, o: &OverlayPlanes) -> Image {
-    let mut out = img.clone();
-    let mono = out.is_mono();
     let a = &o[3].0;
     let n = a.len();
+    let coloured = (0..n).any(|i| a[i] > 0.0 && ((o[0].0[i] - o[1].0[i]).abs() > 0.004 || (o[1].0[i] - o[2].0[i]).abs() > 0.004));
+    let mut out = if img.is_mono() && coloured {
+        let plane = img.channels()[0].clone();
+        Image::new(img.width(), img.height(), vec![plane.clone(), plane.clone(), plane], img.source_bit_depth)
+    } else {
+        img.clone()
+    };
+    let mono = out.is_mono();
     for (c, ch) in out.channels_mut().iter_mut().enumerate() {
         for (i, v) in ch.iter_mut().enumerate().take(n) {
             let p = if mono { (o[0].0[i] + o[1].0[i] + o[2].0[i]) / 3.0 } else { o[c.min(2)].0[i] };
@@ -1195,5 +1202,10 @@ mod tests {
         let out = apply_overlay(&img, &o);
         assert_eq!([out.channels()[0][0], out.channels()[1][0], out.channels()[2][0]], [1.0, 0.0, 0.0]);
         assert_eq!(out.channels()[1][1], 0.5);
+        // A coloured layer over a mono picture keeps its colour.
+        let mono = Image::new(2, 1, vec![vec![0.5, 0.5]], 8);
+        let out = apply_overlay(&mono, &o);
+        assert_eq!(out.channels().len(), 3);
+        assert_eq!([out.channels()[0][0], out.channels()[1][0], out.channels()[2][0]], [1.0, 0.0, 0.0]);
     }
 }
