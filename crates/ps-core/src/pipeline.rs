@@ -488,6 +488,9 @@ fn own_or<T: Clone>(own: &Module<T>, base: &Option<T>) -> Option<T> {
     if own.enabled { Some(own.params.clone()) } else { base.clone() }
 }
 
+/// What a blend step was computed from: the base's and the layer's generations, and the mode.
+type BlendKey = (u64, u64, BlendMode);
+
 /// Runs pipelines, reusing every stage whose input and parameters did not change.
 #[derive(Default)]
 pub struct Processor {
@@ -512,10 +515,10 @@ pub struct Processor {
     color: Option<Slot<ColorParams>>,
     photocolor: Option<Slot<PhotoColorParams>>,
     layers: HashMap<u64, Option<Slot<LayerKey>>>,
-    blend: Option<Slot<Vec<(u64, u64, BlendMode)>>>,
+    blend: Option<Slot<Vec<BlendKey>>>,
     /// The additive layers: their adjusted image, and that laid over what is below.
     add_layers: HashMap<u64, Option<Slot<LayerKey>>>,
-    add_blend: HashMap<u64, Option<Slot<(u64, u64, BlendMode)>>>,
+    add_blend: HashMap<u64, Option<Slot<BlendKey>>>,
     mineral: Option<Slot<(MineralParams, u64)>>,
     suncolor: Option<Slot<SunColorParams>>,
     gamut: Option<Slot<()>>,

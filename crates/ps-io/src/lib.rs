@@ -71,8 +71,15 @@ pub fn save(path: &Path, img: &Image) -> Result<(), IoError> {
         }
         other => return Err(IoError::Unsupported(format!("export to {other:?}"))),
     };
-    dynamic.save_with_format(path, format)?;
-    Ok(())
+    // Written beside the target and renamed over it: a failure half-way (disk full, power cut)
+    // leaves any existing file intact instead of a truncated one.
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp = path.with_file_name(format!(".{name}.part"));
+    let written = dynamic.save_with_format(&temp, format).map_err(IoError::from).and_then(|()| std::fs::rename(&temp, path).map_err(IoError::from));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
 }
 
 fn extension(path: &Path) -> String {

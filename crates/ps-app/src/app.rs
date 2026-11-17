@@ -225,6 +225,7 @@ pub struct PlanetaryStudio {
     history: History,
     prefs: Preferences,
     settings: SettingsWindow,
+    about_open: bool,
     mosaic_editor: MosaicEditor,
     /// A saved mosaic's frames, being loaded.
     pending_mosaic: Option<Receiver<MosaicFrames>>,
@@ -315,6 +316,7 @@ impl PlanetaryStudio {
             pipeline,
             prefs,
             settings: SettingsWindow::default(),
+            about_open: false,
             mosaic_editor: MosaicEditor::default(),
             pending_mosaic: None,
             document: None,
@@ -372,9 +374,43 @@ impl PlanetaryStudio {
         app
     }
 
+    /// «Informazioni»: version, license, where the crash log goes.
+    fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+        let mut open = true;
+        crate::widgets::window(ctx, tl("Informazioni")).open(&mut open).resizable(false).collapsible(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(ICON_PLANET.rich_text().size(48.0).color(theme::ACCENT_DIM));
+                ui.label(RichText::new("Planetary Studio").size(theme::size::HEADING).strong().color(TEXT));
+                ui.label(RichText::new(tr!("Versione {}", "Version {}", env!("CARGO_PKG_VERSION"))).size(theme::size::SMALL).color(TEXT_WEAK));
+            });
+            ui.add_space(theme::space::M);
+            ui.label(tl("Elaborazione di immagini planetarie, lunari e solari già impilate."));
+            ui.add_space(theme::space::S);
+            crate::panels::hint(ui, tl("Licenza PolyForm Noncommercial 1.0.0. I componenti di terze parti mantengono le loro licenze (THIRD_PARTY.md)."));
+            crate::panels::hint(ui, &tr!("In caso di errore il rapporto è in {}", "After an error the report is in {}", crate::crash::log_dir().display()));
+        });
+        self.about_open = open;
+    }
+
     // ---- file I/O ----------------------------------------------------------------------
 
+    /// One file operation at a time: a second one would finish out of order and clear the busy
+    /// indicator of the first. Says so in the status line and returns true while one runs.
+    fn busy_with_io(&mut self) -> bool {
+        let busy = self.io_busy.is_some();
+        if busy {
+            self.status = tl("Un'altra operazione sui file è in corso: attendi che finisca.").to_string();
+        }
+        busy
+    }
+
     fn open_dialog(&mut self, ctx: &egui::Context) {
+        if self.busy_with_io() {
+            return;
+        }
         let picked = rfd::FileDialog::new()
             .set_title(tl("Apri immagine"))
             .add_filter(tl("Immagini astronomiche e mosaici"), &[ps_io::READ_EXTENSIONS, &[MOSAIC_EXTENSION]].concat())
@@ -395,6 +431,9 @@ impl PlanetaryStudio {
 
     /// Join the frames at full size off the UI thread, then open the result like a file.
     fn create_mosaic(&mut self, ctx: &egui::Context, mosaic: Mosaic, images: Vec<Option<Arc<Image>>>, keep_settings: bool) {
+        if self.busy_with_io() {
+            return;
+        }
         let Some(first) = mosaic.tiles.iter().zip(&images).find(|(t, i)| t.enabled && i.is_some()).map(|(t, _)| t.path.clone()) else { return };
         self.io_busy = Some(tr!("Creazione del mosaico di {} immagini…", "Building the mosaic of {} images…", mosaic.tiles.iter().filter(|t| t.enabled).count()));
         let (tx, ctx) = (self.events_tx.clone(), ctx.clone());
@@ -449,6 +488,9 @@ impl PlanetaryStudio {
 
     /// Decode, analyse and prepare the display texture off the UI thread.
     fn load(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if self.busy_with_io() {
+            return;
+        }
         if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(MOSAIC_EXTENSION)) {
             self.open_saved_mosaic(ctx, &path);
             return;
@@ -473,6 +515,9 @@ impl PlanetaryStudio {
 
     /// Load a mono image as LRGB luminance and register it onto the colour image.
     fn load_luminance(&mut self, ctx: &egui::Context) {
+        if self.busy_with_io() {
+            return;
+        }
         let Some(doc) = &self.document else { return };
         let Some(path) = rfd::FileDialog::new().set_title(tl("Immagine mono per la luminanza")).add_filter(tl("Immagini"), ps_io::READ_EXTENSIONS).pick_file() else {
             return;
@@ -516,6 +561,9 @@ impl PlanetaryStudio {
 
     /// "Esporta come…": pick the file; its format becomes the one quick export uses.
     fn export_dialog(&mut self, ctx: &egui::Context) {
+        if self.busy_with_io() {
+            return;
+        }
         let Some(doc) = &self.document else { return };
         let stem = self.export_stem();
         let picked = rfd::FileDialog::new()
@@ -535,6 +583,9 @@ impl PlanetaryStudio {
 
     /// Export next to the original under [`Self::export_stem`], never overwriting a file.
     fn quick_export(&mut self, ctx: &egui::Context) {
+        if self.busy_with_io() {
+            return;
+        }
         let Some(doc) = &self.document else { return };
         let (dir, stem) = (doc.path.parent().map(Path::to_path_buf).unwrap_or_default(), self.export_stem());
         let ext = self.prefs.export_format.clone();
@@ -610,6 +661,9 @@ impl PlanetaryStudio {
     }
 
     fn export_to(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if self.busy_with_io() {
+            return;
+        }
         let resize = self.resize_params();
         let Some(doc) = &self.document else { return };
         let overlay = doc.overlay();
@@ -1728,19 +1782,20 @@ impl PlanetaryStudio {
             ui.label(ICON_PLANET.rich_text().size(theme::size::ICON).color(ACCENT));
             ui.add_space(4.0);
             ui.menu_button("File", |ui| {
-                if ui.add(egui::Button::new((ICON_FOLDER_OPEN.rich_text(), tl("Apri…"))).shortcut_text(ctx.format_shortcut(&OPEN))).clicked() {
+                let io_free = self.io_busy.is_none();
+                if ui.add_enabled(io_free, egui::Button::new((ICON_FOLDER_OPEN.rich_text(), tl("Apri…"))).shortcut_text(ctx.format_shortcut(&OPEN))).clicked() {
                     self.open_dialog(ctx);
                 }
                 let quick = egui::Button::new((ICON_IOS_SHARE.rich_text(), tl("Esporta"))).shortcut_text(ctx.format_shortcut(&QUICK_EXPORT));
-                if ui.add_enabled(self.document.is_some(), quick).on_hover_text(tl("Accanto all'originale, nel formato dell'ultima volta")).clicked() {
+                if ui.add_enabled(io_free && self.document.is_some(), quick).on_hover_text(tl("Accanto all'originale, nel formato dell'ultima volta")).clicked() {
                     self.quick_export(ctx);
                 }
                 let export = egui::Button::new((ICON_SAVE_AS.rich_text(), tl("Esporta come…"))).shortcut_text(ctx.format_shortcut(&EXPORT));
-                if ui.add_enabled(self.document.is_some(), export).clicked() {
+                if ui.add_enabled(io_free && self.document.is_some(), export).clicked() {
                     self.export_dialog(ctx);
                 }
                 ui.separator();
-                if ui.button((ICON_GRID_VIEW.rich_text(), tl("Nuovo mosaico…"))).on_hover_text(tl("Unisci più immagini sovrapposte dello stesso soggetto (Luna, Sole…) in una sola")).clicked() {
+                if ui.add_enabled(io_free, egui::Button::new((ICON_GRID_VIEW.rich_text(), tl("Nuovo mosaico…")))).on_hover_text(tl("Unisci più immagini sovrapposte dello stesso soggetto (Luna, Sole…) in una sola")).clicked() {
                     self.new_mosaic_dialog(ctx);
                 }
                 let mosaic = self.document.as_ref().and_then(|d| d.mosaic.clone());
@@ -1824,6 +1879,10 @@ impl PlanetaryStudio {
                         ui.label(RichText::new(keys).monospace().color(ACCENT));
                         ui.label(what);
                     });
+                }
+                ui.separator();
+                if ui.button((ICON_INFO.rich_text(), tl("Informazioni su Planetary Studio"))).clicked() {
+                    self.about_open = true;
                 }
             });
 
@@ -2217,6 +2276,7 @@ impl eframe::App for PlanetaryStudio {
         });
         let auto_structure = self.prefs.auto_structure;
         self.settings.show(ctx, &mut self.prefs);
+        self.about_window(ctx);
         if self.prefs.auto_structure != auto_structure {
             // Switched in Settings: adapt the open image too, as the panel's switch does.
             self.apply_actions(ctx, vec![PanelAction::SetAutoStructure(self.prefs.auto_structure)]);

@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn black_sky_is_noticed() {
-        let lum: Vec<f32> = (0..1000).map(|i| if i % 3 == 0 { 0.0 } else { 0.0 }).collect();
+        let lum: Vec<f32> = vec![0.0; 1000];
         let px: Vec<usize> = (0..1000).collect();
         assert!(sky_without_noise(&lum, &px, 0.5).is_some());
         let noisy: Vec<f32> = (0..1000).map(|i| 0.001 * ((i * 7919) % 13) as f32).collect();

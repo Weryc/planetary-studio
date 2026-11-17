@@ -391,7 +391,7 @@ fn main() {
             let raw = sensor.expose(&sensor_planes, &mut rng);
             let q = stack::quality(&raw, &sensor);
             let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if n % 50 == 0 {
+            if n.is_multiple_of(50) {
                 eprintln!("  fotogrammi {n}/{frames}  ({:.0} s)", started.elapsed().as_secs_f32());
             }
             (q, raw)

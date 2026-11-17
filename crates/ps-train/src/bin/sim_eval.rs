@@ -765,8 +765,8 @@ fn main() {
         // The predicted curve applied as the app applies it: the smart sharpening with the
         // network's curve (R, G, B on a colour planet), with and without "Segui le zone", and on
         // the luminance only for comparison.
-        if net_app {
-            if let Some(g) = predicted.get(&name) {
+        if net_app
+            && let Some(g) = predicted.get(&name) {
                 let (fc, st, table) = ps_core::curve_net::smart_curve(&ps_core::curve_net::Prediction { gains: g.clone(), spread: 0.0 });
                 let base = ps_core::preset::auto_smart(a.kind, &a, ps_core::preset::AutoStrength::Normal);
                 let subject = ps_core::mask::subject_and_moons(&raw);
@@ -792,7 +792,6 @@ fn main() {
                 }
                 let _ = writeln!(net_tsv, "{name}\t{}", cells.join("\t"));
             }
-        }
         let view_of = |img: &Image, _l: &[f32]| view(img, mapping, top);
         if deconv_test {
             let psf = stack_psf(&lr, &lt, w, 20);

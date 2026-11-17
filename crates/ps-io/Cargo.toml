@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 image = { version = "0.25.10", default-features = false, features = ["tiff", "png", "jpeg"] }
-ps-core = { version = "0.4.0", path = "../ps-core" }
+ps-core = { version = "1.0.0", path = "../ps-core" }
 thiserror = "2.0.21"
 
 [dev-dependencies]

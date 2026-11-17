@@ -4,6 +4,7 @@ mod app;
 mod datetime;
 mod history;
 mod annotate;
+mod crash;
 mod identify_ui;
 mod instrument;
 mod mosaic_ui;
@@ -18,6 +19,7 @@ mod widgets;
 mod worker;
 
 fn main() -> eframe::Result {
+    crash::install();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Planetary Studio")
