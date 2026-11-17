@@ -34,3 +34,4 @@ maschere a livelli, nitidezza e riduzione rumore appresi. README.md / README.it.
 ## Convenzioni
 - Documentazione e commenti in italiano; commenti di codice spesso in inglese.
 - Verifica rapida: `cargo check --workspace --all-targets`.
+- I 6 test `#[ignore]` (`snapshot*`, `annotate_sample`) sono istantanee manuali: servono immagini vere e variabili `PS_SNAPSHOT_IMAGE`/`PS_SNAPSHOT_OUT`; il comando è nel commento di ciascuno.

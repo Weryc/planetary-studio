@@ -939,3 +939,21 @@ fn snapshot() {
     settle(&mut harness);
     harness.render().unwrap().save(out_dir.join("ui_settings.png")).unwrap();
 }
+
+/// Closing asks only when adjustments exist that were neither exported nor saved.
+#[test]
+fn unsaved_changes_are_tracked() {
+    let (w, h) = (64, 64);
+    let plane: Vec<f32> = (0..w * h).map(|i| (i % w) as f32 / w as f32).collect();
+    let mut harness = opened([1200.0, 800.0], Image::new(w, h, vec![plane], 16));
+    assert!(!harness.state().has_unsaved_changes(), "a freshly opened image has nothing to lose");
+    harness.state_mut().pipeline.deconv.params.iterations += 5;
+    assert!(harness.state().has_unsaved_changes());
+    // An export of the current settings makes them clean; a later change makes them dirty again.
+    harness.state_mut().exporting = Some(harness.state().pipeline.clone());
+    harness.state().events_tx.send(Event::Exported { path: "out.tif".into(), elapsed: Duration::ZERO }).unwrap();
+    harness.run_steps(2);
+    assert!(!harness.state().has_unsaved_changes());
+    harness.state_mut().pipeline.deconv.params.iterations += 5;
+    assert!(harness.state().has_unsaved_changes());
+}

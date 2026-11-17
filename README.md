@@ -46,6 +46,7 @@ Get the latest version from the **[Releases page](../../releases/latest)**:
 - **Identify & label** — names of the moons of Jupiter and Saturn, lunar craters and maria, solar orientation, from the capture time; export with the names on the image.
 - **Colour** — Jupiter's colour matched to NASA maps belt by belt (photometric colour), solar false-colour palettes for H-alpha.
 - **Resize on export** with classic kernels (Lanczos, Mitchell) chosen per subject.
+- **Export formats** — TIFF and PNG at 16 bit, JPEG at 8 bit. The file is written whole or not at all. Metadata of the input (FITS header, EXIF) is not copied to the exported file.
 - **Interface in English and Italian** (switch in Settings).
 - **Mosaics** of lunar panels taken with the same focal length.
 - **Formats**: TIFF 8/16/32-bit, FITS, PNG, JPEG.

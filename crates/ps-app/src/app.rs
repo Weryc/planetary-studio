@@ -226,6 +226,13 @@ pub struct PlanetaryStudio {
     prefs: Preferences,
     settings: SettingsWindow,
     about_open: bool,
+    /// The pipeline as last exported or saved (or as the image was opened): closing with a
+    /// different one asks first.
+    clean_pipeline: Pipeline,
+    /// The pipeline of the export under way; it becomes the clean one when that succeeds.
+    exporting: Option<Pipeline>,
+    confirm_close: bool,
+    close_confirmed: bool,
     mosaic_editor: MosaicEditor,
     /// A saved mosaic's frames, being loaded.
     pending_mosaic: Option<Receiver<MosaicFrames>>,
@@ -317,6 +324,10 @@ impl PlanetaryStudio {
             prefs,
             settings: SettingsWindow::default(),
             about_open: false,
+            clean_pipeline: Pipeline::default(),
+            exporting: None,
+            confirm_close: false,
+            close_confirmed: false,
             mosaic_editor: MosaicEditor::default(),
             pending_mosaic: None,
             document: None,
@@ -372,6 +383,46 @@ impl PlanetaryStudio {
             app.load(&cc.egui_ctx, path);
         }
         app
+    }
+
+    /// Adjustments made since the image was opened, exported or saved.
+    fn has_unsaved_changes(&self) -> bool {
+        self.document.is_some() && self.pipeline != self.clean_pipeline
+    }
+
+    /// Closing the window with adjustments neither exported nor saved asks first.
+    fn close_guard(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && self.has_unsaved_changes() && !self.close_confirmed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.confirm_close = true;
+        }
+        if !self.confirm_close {
+            return;
+        }
+        let frame = egui::Frame::new().fill(theme::PANEL).corner_radius(theme::radius::WINDOW).inner_margin(20).stroke(egui::Stroke::new(1.0, BORDER));
+        let response = egui::Modal::new(egui::Id::unique("confirm-close")).frame(frame).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new(tl("Uscire senza esportare?")).size(theme::size::HEADING).strong().color(TEXT));
+            ui.add_space(theme::space::M);
+            ui.label(tl("Le regolazioni fatte su questa immagine non sono state né esportate né salvate."));
+            ui.add_space(theme::space::L);
+            let mut quit = false;
+            ui.horizontal(|ui| {
+                if ui.add(primary_button(None, tl("Torna all'immagine"))).clicked() {
+                    self.confirm_close = false;
+                }
+                if ui.button(tl("Esci senza esportare")).clicked() {
+                    quit = true;
+                }
+            });
+            quit
+        });
+        if response.inner {
+            self.close_confirmed = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if response.should_close() {
+            self.confirm_close = false;
+        }
     }
 
     /// «Informazioni»: version, license, where the crash log goes.
@@ -666,6 +717,7 @@ impl PlanetaryStudio {
         }
         let resize = self.resize_params();
         let Some(doc) = &self.document else { return };
+        self.exporting = Some(self.pipeline.clone());
         let overlay = doc.overlay();
         let pipeline = self.processed_pipeline(doc);
         // Usually already rendered (in the foreground or in the background while on a ROI).
@@ -703,7 +755,10 @@ impl PlanetaryStudio {
         if let Some(path) = picked {
             let json = serde_json::to_string_pretty(&self.pipeline).expect("pipeline serialises");
             self.status = match std::fs::write(&path, json) {
-                Ok(()) => tr!("impostazioni salvate in {}", "settings saved to {}", file_name(&path)),
+                Ok(()) => {
+                    self.clean_pipeline = self.pipeline.clone();
+                    tr!("impostazioni salvate in {}", "settings saved to {}", file_name(&path))
+                }
                 Err(e) => tr!("salvataggio fallito: {e}", "saving failed: {e}"),
             };
         }
@@ -1128,6 +1183,7 @@ impl PlanetaryStudio {
                         let (strength, scales) = (self.prefs.auto_strength, self.prefs.wavelet_scales);
                         self.pipeline = if self.prefs.auto_settings { auto_pipeline_with(analysis.kind, &analysis, strength, scales) } else { self.starting_point(analysis.kind, &analysis) };
                         self.history = History::new(&self.pipeline);
+                        self.clean_pipeline = self.pipeline.clone();
                     }
                     let image = Arc::new(image);
                     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(tl("immagine")).to_string();
@@ -1173,8 +1229,14 @@ impl PlanetaryStudio {
                 Event::Exported { path, elapsed } => {
                     self.status = tr!("esportata {} in {}", "exported {} in {}", file_name(&path), format_duration(elapsed));
                     self.last_export = Some(path);
+                    if let Some(exported) = self.exporting.take() {
+                        self.clean_pipeline = exported;
+                    }
                 }
-                Event::Failed(message) => self.status = message,
+                Event::Failed(message) => {
+                    self.exporting = None;
+                    self.status = message;
+                }
             }
         }
 
@@ -2262,6 +2324,7 @@ impl eframe::App for PlanetaryStudio {
         let ctx = &ui.ctx().clone();
         self.handle_events(ctx);
         self.handle_shortcuts(ctx);
+        self.close_guard(ctx);
         // The subject (the Identifica tab's choice over the file name, log or pixels) decides which
         // subject-specific cards exist.
         self.prefs.subject = self.document.as_ref().and_then(|d| self.identify.chosen_body().or(identify_input(d).body));

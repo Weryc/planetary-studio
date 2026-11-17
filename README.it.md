@@ -46,6 +46,7 @@ Scarica l'ultima versione dalla **[pagina delle Release](../../releases/latest)*
 - **Identifica e annota** — nomi delle lune di Giove e Saturno, crateri e mari lunari, orientamento del Sole, dall'ora della ripresa; esportazione con i nomi sull'immagine.
 - **Colore** — il colore di Giove riportato a quello delle mappe NASA banda per banda (colore fotometrico), palette in falsi colori per il Sole in H-alfa.
 - **Ridimensionamento all'esportazione** con kernel classici (Lanczos, Mitchell) scelti per soggetto.
+- **Formati di esportazione** — TIFF e PNG a 16 bit, JPEG a 8 bit. Il file viene scritto per intero o per niente. I metadati del file di partenza (intestazione FITS, EXIF) non vengono copiati nel file esportato.
 - **Interfaccia in italiano e inglese** (si cambia nelle Impostazioni).
 - **Mosaici** di riprese lunari fatte con la stessa focale.
 - **Formati**: TIFF 8/16/32 bit, FITS, PNG, JPEG.
