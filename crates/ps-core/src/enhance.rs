@@ -62,10 +62,22 @@ impl Default for NoiseParams {
 }
 
 pub fn denoise(img: &Image, p: &NoiseParams) -> Image {
+    denoise_planned(img, p, None)
+}
+
+/// [`denoise`], the guided method using `plan` (measured on an image `img` sits in, at the
+/// offset given) instead of measuring `img` itself: a zoomed region then gets the whole
+/// image's estimate.
+pub fn denoise_planned(img: &Image, p: &NoiseParams, plan: Option<(&crate::noise_net::NoisePlan, (usize, usize))>) -> Image {
     if p.method == NoiseMethod::Guided {
-        if let Some(guided) = crate::noise_net::guided_denoise(img, p.strength) {
+        let guided = match plan {
+            Some((plan, offset)) => Some(crate::noise_net::apply_plan(img, plan, offset, p.strength)),
+            None => crate::noise_net::guided_denoise(img, p.strength),
+        };
+        if let Some(guided) = guided {
             return finish_guided(img, guided, p);
         }
+        crate::log::warn("rumore", &format!("rete del rumore non applicabile su {}×{} (nessun disco intero): si usa il metodo appreso", img.width(), img.height()));
         return denoise(img, &NoiseParams { method: NoiseMethod::Learned, ..p.clone() });
     }
     let (w, h) = (img.width(), img.height());

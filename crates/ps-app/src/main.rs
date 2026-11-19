@@ -18,6 +18,12 @@ mod widgets;
 mod worker;
 
 fn main() -> eframe::Result {
+    // The log the user can send when something goes wrong (see ps_core::log for where it is).
+    if let Some(path) = ps_core::log::default_path()
+        && ps_core::log::init(&path).is_ok()
+    {
+        ps_core::log::info("avvio", &format!("Planetary Studio {} su {} {}, {} core", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, std::thread::available_parallelism().map_or(0, |n| n.get())));
+    }
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Planetary Studio")

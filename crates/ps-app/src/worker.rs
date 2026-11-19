@@ -151,6 +151,9 @@ impl Worker {
             thumbs: HashMap::new(),
             roi_planes: HashMap::new(),
             proxy_planes: HashMap::new(),
+            noise_plan: None,
+            smart_reference: None,
+            roi_reference_gen: 0,
         };
         std::thread::Builder::new()
             .name("processing".into())
@@ -223,6 +226,26 @@ struct WorkerThread {
     roi_planes: HashMap<(u64, Roi), Plane>,
     /// Reduced auxiliary planes for the quick preview: (full generation, factor) → plane.
     proxy_planes: HashMap<(u64, usize), Plane>,
+    /// The guided noise reduction's measures of the full source (by its generation), which a
+    /// ROI is reduced with, so it matches the whole image.
+    noise_plan: Option<(u64, Option<Arc<ps_core::noise_net::NoisePlan>>)>,
+    /// The smart sharpening's measures from the last whole-image render: (what comes before the
+    /// sharpening, see [`before_smart`], measures, generation). A ROI is sharpened with them.
+    smart_reference: Option<(String, Arc<ps_core::smart::SmartReference>, u64)>,
+    /// Generation of the measures the last ROI render used (0: its own).
+    roi_reference_gen: u64,
+}
+
+/// What the smart sharpening's input depends on: the source and the steps before it.
+fn before_smart(req: &Request) -> String {
+    let p = &req.pipeline;
+    format!("{}|{}", req.source_gen, serde_json::to_string(&(&p.align, &p.bxt, &p.deconv, &p.denoise, &p.wavelet, &p.contrast)).unwrap_or_default())
+}
+
+#[derive(Clone, Copy)]
+enum InputKind {
+    Full,
+    Other,
 }
 
 /// What a request is processed on, besides the full source.
@@ -263,9 +286,17 @@ impl WorkerThread {
         let mut roi_source: Option<RoiSource> = None;
         // Full-image version of the last ROI request, rendered once nothing else is queued.
         let mut pending_full: Option<Request> = None;
+        // The last ROI request, rendered again when the whole image's render brings the smart
+        // sharpening's measures it lacked (so the ROI matches the whole image).
+        let mut last_roi: Option<(u64, Request)> = None;
+        let mut again: Option<(u64, Request)> = None;
 
         loop {
-            let next = if pending_full.is_some() {
+            let mut rerun = false;
+            let next = if let Some(job) = again.take() {
+                rerun = true;
+                Some(job)
+            } else if pending_full.is_some() {
                 match self.jobs.try_recv() {
                     Ok(job) => Some(job),
                     Err(TryRecvError::Empty) => None,
@@ -293,14 +324,27 @@ impl WorkerThread {
                     }
                     self.ctx.request_repaint();
                 }
+                if let Some((roi_id, roi_req)) = &last_roi
+                    && self.latest.load(Ordering::SeqCst) == *roi_id
+                    && let Some((key, _, generation)) = &self.smart_reference
+                    && *generation != self.roi_reference_gen
+                    && *key == before_smart(roi_req)
+                {
+                    again = Some((*roi_id, roi_req.clone()));
+                }
                 continue;
             };
 
             if let Some(newer) = self.jobs.try_iter().last() {
                 job = newer;
+                rerun = false;
             }
             let (id, req) = job;
-            pending_full = req.roi.map(|_| Request { roi: None, proxy: 1, ..req.clone() });
+            // A ROI rendered again with fresh measures: the whole image is already done.
+            if !rerun {
+                pending_full = req.roi.map(|_| Request { roi: None, proxy: 1, ..req.clone() });
+            }
+            last_roi = req.roi.map(|_| (id, req.clone()));
 
             let (processor, input) = match req.roi {
                 None if req.proxy > 1 => {
@@ -420,6 +464,10 @@ impl WorkerThread {
             Input::Roi(c) => Some(c),
             _ => None,
         };
+        let input_kind = match input {
+            Input::Full => InputKind::Full,
+            _ => InputKind::Other,
+        };
         let (input, input_gen, masks, luminance, overlay) = match input {
             Input::Proxy(c) => {
                 let f = c.factor;
@@ -445,10 +493,47 @@ impl WorkerThread {
             }
             Input::Full => (Arc::clone(&req.source), req.source_gen, full_masks.clone(), req.luminance.clone(), req.overlay.clone()),
         };
-        let aux = Aux { masks: &masks, luminance, overlay, bxt_executable: req.bxt_executable.as_deref(), ringing_map: req.ringing_map, smart_view: req.smart_view };
+        // A ROI is reduced with the whole image's noise measures, placed at its region.
+        let noise_plan = match roi_input {
+            Some(c) if ps_core::pipeline::uses_guided_denoise(&pipeline) => {
+                if !matches!(&self.noise_plan, Some((g, _)) if *g == req.source_gen) {
+                    self.noise_plan = Some((req.source_gen, ps_core::noise_net::plan(&req.source).map(Arc::new)));
+                }
+                self.noise_plan.as_ref().and_then(|(_, plan)| plan.clone()).map(|plan| (plan, (c.region.x, c.region.y)))
+            }
+            _ => None,
+        };
+        // A ROI is sharpened with the whole image's measures, when they are for the same steps.
+        let smart_reference = match roi_input {
+            Some(_) => {
+                let key = before_smart(&req);
+                self.smart_reference.as_ref().filter(|(k, ..)| *k == key).map(|(_, r, g)| (Arc::clone(r), *g))
+            }
+            None => None,
+        };
+        if roi_input.is_some() {
+            self.roi_reference_gen = smart_reference.as_ref().map_or(0, |r| r.1);
+        }
+        let aux = Aux {
+            masks: &masks,
+            luminance,
+            overlay,
+            bxt_executable: req.bxt_executable.as_deref(),
+            ringing_map: req.ringing_map,
+            smart_view: req.smart_view,
+            noise_plan,
+            smart_reference,
+        };
+        let full_render = matches!(input_kind, InputKind::Full);
         // What the clipping warning compares with.
         let unprocessed = Arc::clone(&input);
         let out = processor.run(input, input_gen, &pipeline, &aux, cancel, report)?;
+        if full_render && let Some(r) = &out.smart_reference {
+            let key = before_smart(&req);
+            if !matches!(&self.smart_reference, Some((k, old, _)) if *k == key && old.as_ref() == r.as_ref()) {
+                self.smart_reference = Some((key, Arc::clone(r), next_generation()));
+            }
+        }
         let to_region = |img: Arc<Image>| match (req.roi, roi_input) {
             (Some(roi), Some(c)) => Arc::new(img.crop(roi.x - c.region.x, roi.y - c.region.y, roi.w, roi.h)),
             _ => img,

@@ -72,6 +72,11 @@ pub struct SmartParams {
     /// with the curve chosen, the response's position (`peak`) moves around this frequency.
     pub network_strength: f32,
     pub network_cutoff: f32,
+    /// Saturn: the rings' own network curve (shape, strength, peak), applied on the rings while
+    /// the one above goes to the globe, blended by a soft mask of the globe. Empty elsewhere.
+    pub network_rings: Vec<(f32, f32)>,
+    pub network_rings_strength: f32,
+    pub network_rings_cutoff: f32,
 }
 
 /// Shape of the boost across sizes of detail, relative to the cut-off. The default is the one
@@ -89,7 +94,7 @@ pub enum SmartCurve {
     /// wasn't sharp); projects saved with either open with this one.
     #[serde(alias = "LearnedRef")]
     Learned,
-    /// Predicted by the subject's network (Jupiter for now), trained on simulated stacks.
+    /// Predicted by the subject's network (Jupiter; Saturn's globe and rings), trained on simulated stacks.
     Network,
 }
 
@@ -100,7 +105,7 @@ impl SmartCurve {
         match self {
             Self::Standard => "Standard",
             Self::Learned => tl("Appresa dai riferimenti"),
-            Self::Network => tl("Appresa (Giove)"),
+            Self::Network => tl("Appresa (rete)"),
         }
     }
 
@@ -108,7 +113,7 @@ impl SmartCurve {
         match self {
             Self::Standard => tl("Come BlurXTerminator sulle immagini planetarie: il massimo sul dettaglio più fine presente, un po' anche sulle strutture grandi."),
             Self::Learned => tl("Forma e forza scelte da un piccolo modello che ha imparato da immagini nitide di Hubble, Cassini, SDO e della NASA, riportate a dimensioni amatoriali e viste attraverso un seeing simulato come in uno stack vero: centinaia di fotogrammi con turbolenza, i migliori allineati e sommati. Decide solo le impostazioni: i pixel li calcolano sempre le wavelet."),
-            Self::Network => tl("Curva prevista da una piccola rete addestrata per questo soggetto (per ora Giove) su stack simulati: centinaia di fotogrammi attraverso seeing e sensore, allineati e sommati davvero, confrontati con l'originale nitido. Guarda lo spettro del disco e il rumore nel cielo (se il cielo è stato tagliato a nero lo ignora) e sceglie quanto spingere ogni dimensione di dettaglio. Nitidezza e forma della risposta restano regolabili."),
+            Self::Network => tl("Curva prevista da una piccola rete addestrata per questo soggetto (Giove; Saturno con una curva per il globo e una per gli anelli) su stack simulati: centinaia di fotogrammi attraverso seeing e sensore, allineati e sommati davvero, confrontati con l'originale nitido. Guarda lo spettro del disco e il rumore nel cielo (se il cielo è stato tagliato a nero lo ignora) e sceglie quanto spingere ogni dimensione di dettaglio. Nitidezza e forma della risposta restano regolabili."),
         }
     }
 
@@ -153,6 +158,9 @@ impl Default for SmartParams {
             network: Vec::new(),
             network_strength: 0.0,
             network_cutoff: 0.0,
+            network_rings: Vec::new(),
+            network_rings_strength: 0.0,
+            network_rings_cutoff: 0.0,
         }
     }
 }
@@ -179,6 +187,26 @@ impl SmartParams {
     /// Whether the network's curve is the one in use (chosen and present).
     fn uses_network(&self) -> bool {
         self.curve == SmartCurve::Network && self.network.len() >= 2 && self.network_cutoff > 0.0
+    }
+
+    /// Saturn's rings, when their own curve is in use: the same settings with the rings'
+    /// curve, the strength moved as the user moved the globe's (same ratio to the suggestion).
+    pub fn rings_params(&self) -> Option<SmartParams> {
+        if !self.uses_network() || self.network_rings.len() < 2 || self.network_rings_cutoff <= 0.0 {
+            return None;
+        }
+        let ratio = if self.network_strength > 0.0 { self.strength / self.network_strength } else { 1.0 };
+        Some(SmartParams {
+            network: self.network_rings.clone(),
+            network_strength: self.network_rings_strength,
+            network_cutoff: self.network_rings_cutoff,
+            strength: (self.network_rings_strength * ratio).clamp(0.0, MAX_STRENGTH),
+            // The rings are edges against the sky: held back there, their curve lost a seventh
+            // of what it gains (simulated stacks, 2026-11-17), with no halo to save.
+            limb_protection: 0.0,
+            network_rings: Vec::new(),
+            ..self.clone()
+        })
     }
 
     /// The frequency the shape is placed by (before the response's position): the network's
@@ -228,7 +256,8 @@ impl SmartParams {
 
     /// What [`prepare`] depends on (besides the images).
     pub fn prepare_key(&self) -> PrepareKey {
-        let learned = self.table().iter().fold(0u64, |h, &(r, v)| h.rotate_left(7) ^ (u64::from(r.to_bits()) << 32 | u64::from(v.to_bits())));
+        let learned = self.table().iter().chain(self.rings_params().as_ref().map_or(&[][..], |r| &r.network[..])).fold(0u64, |h, &(r, v)| h.rotate_left(7) ^ (u64::from(r.to_bits()) << 32 | u64::from(v.to_bits())));
+        let learned = learned ^ u64::from(self.network_rings_cutoff.to_bits()).rotate_left(17);
         PrepareKey { cutoff: self.base_cutoff().to_bits(), peak: self.peak.to_bits(), curve: self.curve, learned, adaptive: self.adaptive, color: self.color, limb_width: self.limb_width.to_bits() }
     }
 
@@ -280,7 +309,7 @@ fn cutoff_of(p: &SmartParams, plane: &[f32], w: usize, h: usize) -> f32 {
 }
 
 /// How much sharpening already happened, by frequency: √(P_now / P_before), 1 if unknown.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Done(Vec<(f32, f32)>);
 
 impl Done {
@@ -303,11 +332,20 @@ impl Done {
 
 /// Brightness relative to the subject's, per pixel: photon noise grows with it.
 fn brightness(plane: &[f32], w: usize, h: usize) -> Vec<f32> {
+    brightness_with(plane, w, h, brightness_reference(plane))
+}
+
+/// The level [`brightness`] is relative to: the median of the lit part of `plane`.
+fn brightness_reference(plane: &[f32]) -> f32 {
     let mut sample: Vec<f32> = plane.iter().step_by(plane.len().div_ceil(1 << 16).max(1)).copied().collect();
     sample.sort_by(f32::total_cmp);
     let top = sample.get(sample.len() * 99 / 100).copied().unwrap_or(1.0).max(1e-6);
     let lit: Vec<f32> = sample.iter().copied().filter(|&v| v > 0.15 * top).collect();
-    let reference = lit.get(lit.len() / 2).copied().unwrap_or(top);
+    lit.get(lit.len() / 2).copied().unwrap_or(top)
+}
+
+/// [`brightness`] relative to a given level.
+fn brightness_with(plane: &[f32], w: usize, h: usize, reference: f32) -> Vec<f32> {
     let floor = 0.1 * reference;
     let smooth = crate::mask::gaussian_approx(plane, w, h, 2.0);
     smooth.into_par_iter().map(|v| (v.max(0.0) + floor) / (reference + floor)).collect()
@@ -351,8 +389,30 @@ pub struct PrepareKey {
     limb_width: u32,
 }
 
+/// What [`prepare`] measures on the whole of a plane: a zoomed region reuses it, so it is
+/// sharpened as the whole image is (its own noise and brightness would differ).
+#[derive(Clone, Debug, PartialEq)]
+struct PlaneMeasures {
+    cutoff: f32,
+    /// The noise of each layer, as white noise measured on the finest.
+    white_noise: Vec<f32>,
+    /// The level the brightness is relative to.
+    light: f32,
+    /// What earlier steps did (measured over the whole image).
+    done: Done,
+}
+
+/// [`prepare`]'s measures of a whole image ([`Prepared::reference`]), for a zoomed region of it
+/// ([`prepare_with`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SmartReference {
+    key: PrepareKey,
+    planes: Vec<PlaneMeasures>,
+}
+
 /// One working plane, ready to be sharpened at any strength.
 struct PreparedPlane {
+    measures: PlaneMeasures,
     cutoff: f32,
     transform: WaveletParams,
     /// (layer index, layer weighted by its share of real detail): only layers the curve boosts.
@@ -366,35 +426,61 @@ struct PreparedPlane {
 /// and limb protection.
 pub struct Prepared {
     planes: Vec<PreparedPlane>,
+    /// Saturn with two curves: the rings' prepared planes and the globe's weight per pixel.
+    rings: Option<(Vec<PreparedPlane>, Vec<f32>)>,
 }
 
 impl Prepared {
+    /// What was measured, for a zoomed region of the same image prepared with `p`.
+    pub fn reference(&self, p: &SmartParams) -> SmartReference {
+        SmartReference { key: p.prepare_key(), planes: self.planes.iter().map(|q| q.measures.clone()).collect() }
+    }
+
     /// Memory held (bytes).
     pub fn bytes(&self) -> usize {
-        self.planes.iter().map(|p| 4 * (p.band.len() + p.layers.iter().map(|l| l.1.len()).sum::<usize>())).sum()
+        let of = |planes: &[PreparedPlane]| planes.iter().map(|p| 4 * (p.band.len() + p.layers.iter().map(|l| l.1.len()).sum::<usize>())).sum::<usize>();
+        of(&self.planes) + self.rings.as_ref().map_or(0, |(r, m)| of(r) + 4 * m.len())
     }
 }
 
 /// Decompose and weight `img`; `before` is the image before any earlier sharpening.
 pub fn prepare(img: &Image, before: Option<&Image>, p: &SmartParams) -> Prepared {
+    prepare_with(img, before, p, None)
+}
+
+/// [`prepare`] a zoomed region with the measures of the whole image (`reference`, used when
+/// prepared with the same settings).
+pub fn prepare_with(img: &Image, before: Option<&Image>, p: &SmartParams, reference: Option<&SmartReference>) -> Prepared {
     let (w, h) = (img.width(), img.height());
     let planes = working_planes(img, p.color);
     let before_planes = before.filter(|b| b.width() == w && b.height() == h).map(|b| working_planes(b, p.color));
+    let reference = reference.filter(|r| r.key == p.prepare_key() && r.planes.len() == planes.len());
     // One plane at a time: each is already processed in parallel, and memory stays low.
-    let planes = planes.iter().enumerate().map(|(k, plane)| prepare_plane(plane, before_planes.as_ref().map(|b| b[k].as_slice()), w, h, p)).collect();
-    Prepared { planes }
+    let prep = |q: &SmartParams, measured: Option<&SmartReference>| {
+        planes.iter().enumerate().map(|(k, plane)| prepare_plane(plane, before_planes.as_ref().map(|b| b[k].as_slice()), w, h, q, measured.map(|r| &r.planes[k]))).collect::<Vec<_>>()
+    };
+    let rings = p.rings_params().and_then(|r| crate::saturn::zones(before.unwrap_or(img)).map(|z| (prep(&r, None), z.planet)));
+    Prepared { planes: prep(p, reference), rings }
 }
 
-fn prepare_plane(plane: &[f32], before: Option<&[f32]>, w: usize, h: usize, p: &SmartParams) -> PreparedPlane {
-    let cutoff = cutoff_of(p, before.unwrap_or(plane), w, h);
+fn prepare_plane(plane: &[f32], before: Option<&[f32]>, w: usize, h: usize, p: &SmartParams, measured: Option<&PlaneMeasures>) -> PreparedPlane {
+    let cutoff = measured.map_or_else(|| cutoff_of(p, before.unwrap_or(plane), w, h), |m| m.cutoff);
     let fp = p.peak * cutoff;
-    let done = before.map_or_else(Done::default, |b| Done::measure(plane, b, w, h));
+    let done = match (measured, before) {
+        (Some(m), Some(_)) => m.done.clone(),
+        (None, Some(b)) => Done::measure(plane, b, w, h),
+        (_, None) => Done::default(),
+    };
     let transform = transform(p.finest() * fp);
     let Some(mut d) = decompose(plane, w, h, &transform, &|| false) else {
-        return PreparedPlane { cutoff, transform, layers: Vec::new(), band: vec![0.0; plane.len()], done };
+        let measures = PlaneMeasures { cutoff, white_noise: Vec::new(), light: 1.0, done: done.clone() };
+        return PreparedPlane { measures, cutoff, transform, layers: Vec::new(), band: vec![0.0; plane.len()], done };
     };
     let band = limb_band(d.edges(), w, h, fp, p.limb_width);
-    let light = if p.adaptive { Some(brightness(plane, w, h)) } else { None };
+    let white_noise = measured.map(|m| m.white_noise.clone()).filter(|v| v.len() == d.white_noise.len()).unwrap_or_else(|| d.white_noise.clone());
+    let light_ref = measured.map_or_else(|| brightness_reference(plane), |m| m.light);
+    let measures = PlaneMeasures { cutoff, white_noise: white_noise.clone(), light: light_ref, done: done.clone() };
+    let light = if p.adaptive { Some(brightness_with(plane, w, h, light_ref)) } else { None };
     let mut layers = Vec::new();
     for (j, mut layer) in std::mem::take(&mut d.layers).into_iter().enumerate() {
         // Layers the curve never boosts, at any strength, aren't needed.
@@ -402,12 +488,12 @@ fn prepare_plane(plane: &[f32], before: Option<&[f32]>, w: usize, h: usize, p: &
             continue;
         }
         if let Some(light) = &light {
-            let share = layer_share(&layer, d.white_noise[j], light, w, h, transform.scale(j));
+            let share = layer_share(&layer, white_noise[j], light, w, h, transform.scale(j));
             layer.par_iter_mut().zip(share).for_each(|(v, s)| *v *= s);
         }
         layers.push((j, layer));
     }
-    PreparedPlane { cutoff, transform, layers, band, done }
+    PreparedPlane { measures, cutoff, transform, layers, band, done }
 }
 
 /// The sharpened image from [`prepare`]d `img`; `subject` (0‥1 per pixel, same size) is where
@@ -416,7 +502,16 @@ pub fn apply(prepared: &Prepared, img: &Image, p: &SmartParams, subject: Option<
     let (w, h) = (img.width(), img.height());
     let subject = subject.filter(|m| !p.include_sky && m.len() == w * h);
     let planes = working_planes(img, p.color);
-    let processed = planes.iter().zip(&prepared.planes).map(|(plane, pp)| apply_plane(plane, pp, w, h, p, subject)).collect();
+    let mut processed: Vec<Vec<f32>> = planes.iter().zip(&prepared.planes).map(|(plane, pp)| apply_plane(plane, pp, w, h, p, subject)).collect();
+    // Saturn: the rings' curve where the globe's weight falls to 0.
+    if let (Some((rings, globe)), Some(rp)) = (&prepared.rings, p.rings_params())
+        && globe.len() == w * h
+    {
+        for ((out, plane), pp) in processed.iter_mut().zip(&planes).zip(rings) {
+            let r = apply_plane(plane, pp, w, h, &rp, subject);
+            out.par_iter_mut().zip(r).zip(globe.par_iter()).for_each(|((o, r), t)| *o = r + t * (*o - r));
+        }
+    }
     let mut out = merge_planes(img, p.color, &planes, processed);
     if p.protect_highlights {
         out.channels_mut().par_iter_mut().zip(img.channels()).for_each(|(o, before)| o.iter_mut().zip(before).for_each(|(v, &b)| *v = roll_off(*v, b)));
@@ -663,6 +758,31 @@ mod tests {
         assert!(at(1.5 * c) > 2.5, "1.5× cut-off: {}", at(1.5 * c));
         assert!(at(0.45) < 0.5, "beyond the cut-off: {}", at(0.45));
         assert!(SmartParams::default().is_neutral());
+    }
+
+    /// A zoomed region sharpened with the whole image's measures matches the whole image, also
+    /// after a step that changed the image unevenly (whose effect is measured over all of it).
+    #[test]
+    fn region_with_the_whole_measures_matches() {
+        let side = 256;
+        let disk = |x: f32, y: f32| if (x - 190.0).hypot(y - 128.0) < 40.0 { 0.6 + 0.05 * (0.5 * x).sin() * (0.4 * y).cos() } else { 0.05 };
+        let noise = |i: usize| 0.02 * ((((i as u64).wrapping_mul(2654435761) >> 9) % 1000) as f32 / 1000.0 - 0.5);
+        let before: Vec<f32> = (0..side * side).map(|i| disk((i % side) as f32, (i / side) as f32) + noise(i)).collect();
+        // An earlier step cleaned the left part only.
+        let now: Vec<f32> = (0..side * side).map(|i| if i % side < 120 { disk((i % side) as f32, (i / side) as f32) } else { before[i] }).collect();
+        let (img, prior) = (Image::new(side, side, vec![now], 16), Image::new(side, side, vec![before], 16));
+        let p = SmartParams { strength: 1.0, cutoff: 0.2, adaptive: false, ..Default::default() };
+        let whole_prep = prepare(&img, Some(&prior), &p);
+        let whole = apply(&whole_prep, &img, &p, None);
+        let (x0, y0, w, h) = (128, 0, 128, 256);
+        let (ci, cp) = (img.crop(x0, y0, w, h), prior.crop(x0, y0, w, h));
+        let worst = |reference: Option<&SmartReference>| {
+            let part = apply(&prepare_with(&ci, Some(&cp), &p, reference), &ci, &p, None);
+            let (a, b) = (&whole.channels()[0], &part.channels()[0]);
+            (88..168).flat_map(|y| (40..100).map(move |x| (a[(y + y0) * side + x + x0] - b[y * w + x]).abs())).fold(0.0f32, f32::max)
+        };
+        let (with, without) = (worst(Some(&whole_prep.reference(&p))), worst(None));
+        assert!(with < 0.5 * without, "with {with} without {without}");
     }
 
     /// On a blurred, noisy scene: gentle sharpening brings it closer to the sharp scene;

@@ -1060,7 +1060,29 @@ impl PlanetaryStudio {
                     capture.body = capture.body.or(analysis.planet);
                     capture.measure(&image, &analysis);
                     // The sharpening curve of the subject's network, when there is one for it.
-                    analysis.curve_net = capture.body.and_then(|b| ps_core::curve_net::suggestion(&image, &analysis, b).ok());
+                    let suggestion = capture.body.map(|b| ps_core::curve_net::suggestion(&image, &analysis, b));
+                    ps_core::log::info(
+                        "apertura",
+                        &format!(
+                            "{} ({}×{}, {}) tipo {:?} soggetto {:?} disco {:?} rumore {:.5} SNR {:.0} taglio {:.4} | rete nitidezza: {}",
+                            path.display(),
+                            image.width(),
+                            image.height(),
+                            if image.is_mono() { "mono" } else { "colore" },
+                            analysis.kind,
+                            capture.body,
+                            analysis.disk.map(|d| (d.cx.round(), d.cy.round(), d.radius.round())),
+                            analysis.noise,
+                            analysis.snr,
+                            analysis.spectral.as_ref().map_or(0.0, |s| s.cutoff),
+                            match &suggestion {
+                                Some(Ok(s)) => format!("picco {:.4} forza {:.2} disaccordo {:.2} anelli {} cielo {}", s.cutoff, s.strength, s.spread, s.rings.is_some(), s.sky_note.unwrap_or("usato")),
+                                Some(Err(why)) => format!("nessuna ({why})"),
+                                None => "nessun soggetto".into(),
+                            }
+                        ),
+                    );
+                    analysis.curve_net = suggestion.and_then(Result::ok);
                     // A subject and a time to compute from: open the Identifica tab, which sets
                     // itself up (the moons' fit included).
                     if self.prefs.identify_tab_on_open && !keep_settings && capture.body.is_some() && capture.info.time.is_some() {
@@ -1120,7 +1142,10 @@ impl PlanetaryStudio {
                     self.status = tr!("esportata {} in {}", "exported {} in {}", file_name(&path), format_duration(elapsed));
                     self.last_export = Some(path);
                 }
-                Event::Failed(message) => self.status = message,
+                Event::Failed(message) => {
+                    ps_core::log::error("app", &message);
+                    self.status = message;
+                }
             }
         }
 
@@ -1153,6 +1178,7 @@ impl PlanetaryStudio {
             self.clipped = out.clip_overlay.as_ref().map(|(_, n)| *n);
             self.timings = out.timings.iter().map(|t| (t.stage, t.clone())).collect();
             self.warnings = out.warnings.iter().cloned().collect();
+            log_render(&out);
             self.histogram = Some(out.histogram.clone());
             // A reduced preview is only for looking at: pixel values, the black/white picker
             // and export keep using the last full-resolution result.
@@ -2428,3 +2454,29 @@ fn file_name(path: &Path) -> String {
 #[cfg(test)]
 #[path = "app_tests.rs"]
 mod tests;
+
+/// One line per finished render (ROI or full, not the reduced previews): how long, what went
+/// wrong, and the settings when they changed since the last one logged.
+fn log_render(out: &crate::worker::Output) {
+    use std::sync::Mutex;
+    static LAST: Mutex<String> = Mutex::new(String::new());
+    if out.proxy {
+        return;
+    }
+    let total: f64 = out.timings.iter().map(|t| t.elapsed.as_secs_f64()).sum();
+    let what = match out.roi {
+        Some(r) => format!("anteprima di una zona {}×{} a ({}, {})", r.w, r.h, r.x, r.y),
+        None => "immagine intera".to_string(),
+    };
+    ps_core::log::info("elaborazione", &format!("{what} in {total:.2} s"));
+    for (stage, message) in &out.warnings {
+        ps_core::log::warn("elaborazione", &format!("{stage:?}: {message}"));
+    }
+    if let Ok(json) = serde_json::to_string(&out.pipeline)
+        && let Ok(mut last) = LAST.lock()
+        && *last != json
+    {
+        ps_core::log::info("impostazioni", &json);
+        *last = json;
+    }
+}

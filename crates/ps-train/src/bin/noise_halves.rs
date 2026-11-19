@@ -58,7 +58,13 @@ fn main() {
         // Real stacks (ser_stack) call the full one piena.tif, simulated ones grezza.tif.
         let full_path = if dir.join("piena.tif").exists() { dir.join("piena.tif") } else { dir.join("grezza.tif") };
         let (full, even, odd) = (load(&full_path), load(&dir.join("pari.tif")), load(&dir.join("dispari.tif")));
-        let a = analyze(&full);
+        let mut a = analyze(&full);
+        // NOISE_HALVES_SATURN=1: Saturn's globe as the disk (to compare with Jupiter's data).
+        if std::env::var("NOISE_HALVES_SATURN").is_ok()
+            && let Some(z) = ps_core::saturn::zones(&full)
+        {
+            a.disk = Some(ps_core::analysis::Disk { cx: z.globe.cx, cy: z.globe.cy, radius: z.globe.rx });
+        }
         let Some((m, f)) = measure(&full, &a) else {
             eprintln!("{}: nessun disco misurabile", dir.display());
             continue;
