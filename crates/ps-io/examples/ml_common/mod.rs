@@ -454,7 +454,7 @@ pub fn subject_of(group: &str) -> &'static str {
         "Sun"
     } else if ["heic1609a", "heic1814c", "opo0322", "opo0124", "opo0534", "opo0745", "heic2505", "opo9709", "opo9927"].iter().any(|m| g.starts_with(m)) {
         "Mars"
-    } else if ["heic1917a", "opo2043a", "heic1814b", "pia06193", "heic2312a", "heic2113c", "heic2612a", "heic0904", "opo0115", "opo0323", "opo0418", "opo2305", "opo9828"]
+    } else if ["heic1917a", "opo2043a", "heic1814b", "pia06193", "heic2312a", "heic2113c", "heic2612a", "heic0904", "opo0115", "opo0323", "opo0418", "opo2305", "opo9828", "heic2416", "opo9616"]
         .iter()
         .any(|s| g.starts_with(s))
     {

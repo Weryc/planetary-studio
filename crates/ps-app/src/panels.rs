@@ -1261,6 +1261,12 @@ fn smart_controls(ui: &mut Ui, p: &mut SmartParams, auto: &SmartParams, analysis
                             _ => auto.color,
                         };
                     }
+                    // Saturn's learned curves were measured best with no edge protection (on the
+                    // simulated stacks it held back the globe, its limb included, and the rings):
+                    // choosing them (the default there) starts it at 0, the other curves get Saturn's usual one.
+                    if curve != p.curve && analysis.is_some_and(|a| a.kind == ps_core::analysis::ImageKind::Saturn && a.curve_net.is_some()) && (curve == SmartCurve::Network || p.curve == SmartCurve::Network) {
+                        p.limb_protection = if curve == SmartCurve::Network { 0.0 } else { ps_core::preset::SATURN_LIMB.0 };
+                    }
                     p.curve = curve;
                 }
             }

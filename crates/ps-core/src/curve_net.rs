@@ -1,4 +1,5 @@
-//! The sharpening curve predicted by a small network, one per subject (Jupiter for now).
+//! The sharpening curve predicted by a small network, one per subject (Jupiter; Saturn has two,
+//! globe and rings, see [`crate::saturn`]).
 //!
 //! Trained on simulated stacks (`ps-train`: `sim_stack` simulates hundreds of frames through
 //! seeing and a sensor and stacks them for real, `sim_eval` measures them, `curve_train.py`
@@ -315,15 +316,21 @@ pub struct Suggestion {
     pub spread: f32,
     /// Why the sky was not used, if it wasn't.
     pub sky_note: Option<&'static str>,
+    /// Saturn: the rings' own curve (cut-off, strength, shape); the fields above are the globe's.
+    pub rings: Option<(f32, f32, Vec<(f32, f32)>)>,
 }
 
 /// The curve the subject's network suggests for `img` (its analysis `a`), or why there is none.
 pub fn suggestion(img: &Image, a: &Analysis, body: crate::capture::Body) -> Result<Suggestion, &'static str> {
+    if body == crate::capture::Body::Saturn {
+        let ((cutoff, strength, table), rings, spread, sky_note) = crate::saturn::suggestion(img, a)?;
+        return Ok(Suggestion { body, cutoff, strength, table, spread, sky_note, rings });
+    }
     let model = model_for(body).ok_or("nessuna rete per questo soggetto")?;
     let m = measure(img, a).ok_or("serve un disco intero da misurare")?;
     let p = model.predict(&features(&m)).ok_or("misure incompatibili con la rete")?;
     let (cutoff, strength, table) = smart_curve(&p);
-    Ok(Suggestion { body, cutoff, strength, table, spread: p.spread, sky_note: m.sky_note })
+    Ok(Suggestion { body, cutoff, strength, table, spread: p.spread, sky_note: m.sky_note, rings: None })
 }
 
 #[cfg(test)]

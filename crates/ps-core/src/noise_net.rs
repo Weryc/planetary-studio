@@ -165,19 +165,116 @@ pub fn model() -> &'static NoiseModel {
 }
 
 /// Multiply each frequency band of `plane` (whole image) by its gain (bands as
-/// [`crate::curve_net::band_of`]).
-fn filter_bands(plane: &[f32], w: usize, h: usize, gains: &[f32]) -> Vec<f32> {
-    let plan = crate::fft::FftConvolver::plan(w, h);
-    let mut spec = plan.forward(plane);
+/// [`crate::curve_net::band_of`]). With `margin` > 0 the plane is mirror-padded first: an image
+/// cut through the subject (a zoomed region) would otherwise ring, in stripes, from its border
+/// wrapping onto the opposite one.
+fn filter_bands(plane: &[f32], w: usize, h: usize, gains: &[f32], margin: usize) -> Vec<f32> {
+    let padded = (margin > 0).then(|| crate::fft::Padded::new(plane, w, h, margin));
+    let (data, pw, ph) = padded.as_ref().map_or((plane, w, h), |p| (p.data.as_slice(), p.w, p.h));
+    let plan = crate::fft::FftConvolver::plan(pw, ph);
+    let mut spec = plan.forward(data);
     // Transposed layout: index = kx·h + ky, kx ∈ 0..=w/2.
     for (idx, c) in spec.iter_mut().enumerate() {
-        let (kx, ky) = (idx / h, idx % h);
-        let fy = if ky <= h / 2 { ky as f32 } else { ky as f32 - h as f32 } / h as f32;
-        let g = gains[crate::curve_net::band_of((kx as f32 / w as f32).hypot(fy))];
+        let (kx, ky) = (idx / ph, idx % ph);
+        let fy = if ky <= ph / 2 { ky as f32 } else { ky as f32 - ph as f32 } / ph as f32;
+        let g = gains[crate::curve_net::band_of((kx as f32 / pw as f32).hypot(fy))];
         c.re *= g;
         c.im *= g;
     }
-    plan.inverse(spec)
+    let out = plan.inverse(spec);
+    match padded {
+        Some(p) => p.crop(&out),
+        None => out,
+    }
+}
+
+/// Mirror padding for [`filter_bands`]: [`PAD`] px when the subject reaches the border of
+/// `lum` (its border holds light near the subject's), none when the border is sky (as on a
+/// whole frame: there padding changes nothing that matters).
+fn border_margin(lum: &[f32], w: usize, h: usize) -> usize {
+    let mut border: Vec<f32> = (0..w * h).filter(|&i| i % w < 2 || i % w >= w - 2 || i / w < 2 || i / w >= h - 2).map(|i| lum[i]).collect();
+    let mut all: Vec<f32> = lum.iter().step_by(7).copied().collect();
+    if border.is_empty() || all.is_empty() {
+        return 0;
+    }
+    let pick = |v: &mut Vec<f32>, q: f32| {
+        let k = ((v.len() - 1) as f32 * q) as usize;
+        *v.select_nth_unstable_by(k, f32::total_cmp).1
+    };
+    let (edge, top) = (pick(&mut border, 0.95), pick(&mut all, 0.995));
+    if edge > 0.15 * top { PAD.min(w.max(h)) } else { 0 }
+}
+
+/// Each band's Wiener gain from its measured power and estimated noise (log10, noise from
+/// [`FIRST_BAND`]), `strength` multiplying the noise.
+fn band_gains(strength: f32, power: &[f32], noise: &[f32]) -> Vec<f32> {
+    let mut g = vec![1.0f32; BANDS];
+    for (j, b) in (FIRST_BAND..BANDS).enumerate() {
+        // Larger detail is left alone: there two stacks of the same recording differ by the
+        // seeing's leftover deformation, not by noise a reduction could remove.
+        if crate::curve_net::band_centre(b) < SMALLEST_NOISE_FREQUENCY {
+            continue;
+        }
+        let ratio = 10f32.powf(noise[j] - power[b]);
+        g[b] = (1.0 - strength.max(0.0) * ratio).clamp(0.0, 1.0);
+    }
+    // Never more of a finer band than of a coarser one: a band removed between two kept
+    // ones (a notch) rings around edges, and the finest bands are mostly noise anyway.
+    for b in FIRST_BAND + 1..BANDS {
+        g[b] = g[b].min(g[b - 1]);
+    }
+    g
+}
+
+/// Mirror padding of [`filter_bands`] on each side (px), when needed.
+const PAD: usize = 32;
+
+/// What the guided noise reduction measures on an image, kept apart from applying it so that a
+/// zoomed region is reduced as the whole image is (with the whole image's estimate): each
+/// zone's band power and estimated noise, and for Saturn the globe that splits the two zones.
+#[derive(Clone, Debug)]
+pub struct NoisePlan {
+    /// One zone (a disk), or Saturn's globe then its rings.
+    pub zones: Vec<ZoneNoise>,
+    /// Saturn's globe, in the measured image's pixels: the zones are blended by its soft mask.
+    pub globe: Option<crate::mask::Ellipse>,
+}
+
+/// A zone's measures: log10 band power (all bands) and estimated noise (from [`FIRST_BAND`]),
+/// for the luminance and, on a colour image, the colour differences.
+#[derive(Clone, Debug)]
+pub struct ZoneNoise {
+    pub name: String,
+    pub lum: (Vec<f32>, Vec<f32>),
+    pub colour: Option<(Vec<f32>, Vec<f32>)>,
+}
+
+/// Measure `img` for the guided noise reduction. `None` without a disk (or Saturn) to measure.
+pub fn plan(img: &Image) -> Option<NoisePlan> {
+    let a = crate::analysis::analyze(img);
+    // Saturn: the globe and the rings each with their own estimate (when trained).
+    if a.kind == crate::analysis::ImageKind::Saturn
+        && let Some(p) = crate::saturn::noise_plan(img)
+    {
+        return Some(p);
+    }
+    let (m, _) = measure(img, &a)?;
+    let (noise_lum, noise_col) = model().predict(&features(&m))?;
+    let colour = m.chroma_subject.clone().map(|c| (c, noise_col));
+    Some(NoisePlan { zones: vec![ZoneNoise { name: format!("disco ({:?})", a.kind), lum: (m.lum.subject.clone(), noise_lum), colour }], globe: None })
+}
+
+/// Reduce the noise of `img` with a plan measured on an image `img` sits in at `offset`
+/// (x, y): the whole image itself (0, 0), or the whole image around a zoomed region.
+pub fn apply_plan(img: &Image, plan: &NoisePlan, offset: (usize, usize), strength: f32) -> Image {
+    let reduce = |z: &ZoneNoise| denoise_with(img, strength, (&z.lum.0, &z.lum.1), z.colour.as_ref().map(|(c, n)| (c.as_slice(), n.as_slice())), &z.name);
+    match (plan.zones.as_slice(), plan.globe) {
+        ([globe_zone, rings_zone], Some(globe)) => {
+            let weight = crate::saturn::globe_weight(&globe, img.width(), img.height(), offset);
+            crate::saturn::blend(&reduce(globe_zone), &reduce(rings_zone), &weight)
+        }
+        (zones, _) => reduce(&zones[0]),
+    }
 }
 
 /// Noise reduction guided by the estimator: each frequency band of the brightness and of the
@@ -185,38 +282,70 @@ fn filter_bands(plane: &[f32], w: usize, h: usize, gains: &[f32]) -> Vec<f32> {
 /// inside the subject and the estimated noise power). `strength` multiplies the estimated noise
 /// (1 = as estimated, 0 = nothing removed). `None` without a disk to measure on.
 pub fn guided_denoise(img: &Image, strength: f32) -> Option<Image> {
-    let a = crate::analysis::analyze(img);
-    let (m, _) = measure(img, &a)?;
-    let (noise_lum, noise_col) = model().predict(&features(&m))?;
-    let gains = |power: &[f32], noise: &[f32]| -> Vec<f32> {
-        let mut g = vec![1.0f32; BANDS];
-        for (j, b) in (FIRST_BAND..BANDS).enumerate() {
-            // Larger detail is left alone: there two stacks of the same recording differ by the
-            // seeing's leftover deformation, not by noise a reduction could remove.
-            if crate::curve_net::band_centre(b) < SMALLEST_NOISE_FREQUENCY {
-                continue;
-            }
-            let ratio = 10f32.powf(noise[j] - power[b]);
-            g[b] = (1.0 - strength.max(0.0) * ratio).clamp(0.0, 1.0);
-        }
-        g
-    };
+    Some(apply_plan(img, &plan(img)?, (0, 0), strength))
+}
+
+/// The band Wiener reduction of [`guided_denoise`] from given measures: each band's power where
+/// the estimate holds and the estimated noise there (from [`FIRST_BAND`]), for the luminance
+/// and, on a colour image, for the colour differences.
+pub fn denoise_with(img: &Image, strength: f32, lum: (&[f32], &[f32]), colour: Option<(&[f32], &[f32])>, zone: &str) -> Image {
+    let gains = |power: &[f32], noise: &[f32]| band_gains(strength, power, noise);
     let (w, h) = (img.width(), img.height());
     let (y, chroma) = planes(img);
-    let y2 = filter_bands(&y, w, h, &gains(&m.lum.subject, &noise_lum));
-    let (Some([cr, cb]), Some(cs)) = (chroma, m.chroma_subject.as_ref()) else {
-        return Some(if img.is_mono() { Image::new(w, h, vec![y2], img.source_bit_depth) } else { crate::color::merge_planes(img, ColorMode::Luminance, &[y], vec![y2]) });
+    let gl = gains(lum.0, lum.1);
+    let margin = border_margin(&y, w, h);
+    let gc_log = colour.map(|(c, n)| gains(c, n));
+    let list = |g: &[f32]| g[FIRST_BAND..].iter().map(|v| format!("{v:.2}")).collect::<Vec<_>>().join(" ");
+    crate::log::info("rumore", &format!("{zone}: immagine {w}×{h}{}, forza {strength:.2}, guadagni grana (bande {FIRST_BAND}‥) {} | colore {}", if margin > 0 { " (soggetto sul bordo)" } else { "" }, list(&gl), gc_log.as_deref().map_or("-".into(), list)));
+    let y2 = filter_bands(&y, w, h, &gl, margin);
+    let (Some([cr, cb]), Some((cs, noise_col))) = (chroma, colour) else {
+        return if img.is_mono() { Image::new(w, h, vec![y2], img.source_bit_depth) } else { crate::color::merge_planes(img, ColorMode::Luminance, &[y], vec![y2]) };
     };
-    let gc = gains(cs, &noise_col);
-    let (cr2, cb2) = (filter_bands(&cr, w, h, &gc), filter_bands(&cb, w, h, &gc));
+    let gc = gains(cs, noise_col);
+    let (cr2, cb2) = (filter_bands(&cr, w, h, &gc, margin), filter_bands(&cb, w, h, &gc, margin));
     let r: Vec<f32> = y2.iter().zip(&cr2).map(|(y, c)| y + c).collect();
     let b: Vec<f32> = y2.iter().zip(&cb2).map(|(y, c)| y + c).collect();
     let g: Vec<f32> = (0..w * h).map(|i| (y2[i] - LUMA[0] * r[i] - LUMA[2] * b[i]) / LUMA[1]).collect();
-    Some(Image::new(w, h, vec![r, g, b], img.source_bit_depth))
+    Image::new(w, h, vec![r, g, b], img.source_bit_depth)
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Unit gains change nothing, also on an image cut through a bright subject.
+    #[test]
+    fn unit_gains_keep_the_image() {
+        let (w, h) = (90, 60);
+        let plane: Vec<f32> = (0..w * h).map(|i| if i % w > 60 { 1.0 } else { 0.05 + 0.01 * ((i * 7) % 5) as f32 }).collect();
+        let out = super::filter_bands(&plane, w, h, &[1.0; super::BANDS], super::border_margin(&plane, w, h));
+        assert!(plane.iter().zip(&out).all(|(a, b)| (a - b).abs() < 1e-4));
+    }
+
+    /// Removing fine detail on an image whose right side is bright (a region cut through the
+    /// globe) leaves no stripes far from the edge: the wrap-around seam is in the padding.
+    #[test]
+    fn no_stripes_from_the_border() {
+        let (w, h) = (120, 80);
+        let plane: Vec<f32> = (0..w * h).map(|i| if i % w >= 100 { 1.0 } else { 0.0 }).collect();
+        let mut gains = [1.0f32; super::BANDS];
+        gains[12..].iter_mut().for_each(|g| *g = 0.0);
+        assert!(super::border_margin(&plane, w, h) > 0);
+        let out = super::filter_bands(&plane, w, h, &gains, super::border_margin(&plane, w, h));
+        // The left edge, which the FFT wraps next to the bright right edge, stays dark.
+        let worst = (0..h).flat_map(|y| (0..40).map(move |x| y * w + x)).map(|i| out[i].abs()).fold(0.0f32, f32::max);
+        assert!(worst < 0.01, "{worst}");
+    }
+
+    /// The gains never rise again toward finer bands.
+    #[test]
+    fn gains_fall_with_frequency() {
+        let power = vec![-6.0f32; super::BANDS];
+        // Noise above the power in some middle bands only.
+        let noise: Vec<f32> = (super::FIRST_BAND..super::BANDS).map(|b| if (16..20).contains(&b) { -5.0 } else { -8.0 }).collect();
+        let g = super::band_gains(1.0, &power, &noise);
+        assert!(g.windows(2).all(|p| p[1] <= p[0]), "{g:?}");
+        assert_eq!(g[23], 0.0);
+    }
     /// The exported networks answer as in Python: `NOISE_NET_CHECK` names a JSON list of
     /// {"x": inputs, "p": expected outputs}.
     #[test]

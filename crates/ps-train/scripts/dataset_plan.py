@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan of the simulated-raw dataset for one subject (for now Jupiter), as a TSV that
+"""Plan of the simulated-raw dataset for one subject (Jupiter, or Saturn with `--subject saturno`), as a TSV that
 `dataset_run.sh` executes row by row with `sim_stack`.
 
     python3 crates/ps-train/scripts/dataset_plan.py > Immagini_test/dataset_giove/piano.tsv
@@ -60,6 +60,25 @@ PER_GROUP = {"heic1010b": 12, "heic2412b": 16}  # others: 12
 VALIDATION = [("heic2303e", "heic2303e.jpg"), ("heic1914a", "heic1914a.jpg"), ("opo1016b", "opo1016b.jpg")]
 NIGHTS = [("calmo", 12.0), ("medio", 7.0), ("turbolento", 4.0)]  # r0 at 550 nm, cm
 
+# Saturn (`--subject saturno`, 2026-11-17): `diam` is the ring span (35–46″ over the years,
+# 42″ for the bench); the planet is dimmer than Jupiter, so captures lean to the higher gains.
+# The five opo0115 tilts are one series (1996–2000): one group, so none is ever judged by its
+# siblings. Validation: heic2312a (2022, spokes), heic0904a (2009, rings edge-on), opo2305a (2022).
+SUBJECT = _sys.argv[_sys.argv.index("--subject") + 1] if "--subject" in _sys.argv else "giove"
+GAINS = ["basso", "medio", "alto"]
+DIAM, VAL_DIAM = (33, 49), 44.0
+if SUBJECT == "saturno":
+    TRAIN = [
+        ("heic1917a", ["heic1917a.jpg"]), ("opo2043a", ["opo2043a.jpg"]), ("heic1814b", ["heic1814b.jpg"]),
+        ("PIA06193", ["PIA06193.jpg"]), ("heic2113c", ["heic2113c.jpg"]), ("heic2612a", ["heic2612a_left.jpg"]),
+        ("opo0115", [f"opo0115{c}.jpg" for c in "cdefg"]), ("opo0323c", ["opo0323c.jpg"]),
+        ("opo0418a", ["opo0418a.jpg"]), ("opo9828c", ["opo9828c.jpg"]),
+    ]
+    PER_GROUP = {"opo0115": 15}
+    VALIDATION = [("heic2312a", "heic2312a.jpg"), ("heic0904a", "heic0904a.jpg"), ("opo2305a", "opo2305a.jpg")]
+    GAINS = ["basso", "medio", "medio", "alto", "alto"]
+    DIAM, VAL_DIAM = (35, 46), 42.0
+
 
 R0_CM = (4.0, 22.0)  # training nights, r0 at 550 nm (log-uniform)
 D_R0_FLOOR = 0.6     # below this the capture is diffraction-limited anyway
@@ -80,13 +99,13 @@ def train_rows(rng, done=None):
             scope = SCOPE_ORDER[(start + k) % 7]
             camera = "asi678mc" if scope == "edgehd11" else rng.choice(["imx462c", "imx462c", "imx462m", "asi678mc"])
             r0 = math.exp(rng.uniform(math.log(R0_CM[0]), math.log(R0_CM[1])))
-            gain = rng.choice(["basso", "medio", "alto"])
+            gain = rng.choice(GAINS)
             bits = 12 if gain == "basso" else rng.choice([8, 8, 12])
             frames = int(round(math.exp(rng.uniform(math.log(FRAMES[0]), math.log(FRAMES[1]))), -1))
             rows.append({
                 "split": "train", "group": g, "ref": files[k % len(files)], "scope": scope, "camera": camera,
                 "d_r0": d_r0(scope, r0, D_R0_FLOOR), "r0_cm": round(r0, 1), "night": "-", "gain": gain, "bits": bits,
-                "frames": frames, "keep": round(rng.uniform(*KEEP), 2), "diam": round(rng.uniform(33, 49), 1),
+                "frames": frames, "keep": round(rng.uniform(*KEEP), 2), "diam": round(rng.uniform(*DIAM), 1),
                 "ground": round(rng.uniform(0.45, 0.75), 2),
             })
         per_group.append(rows)
@@ -111,7 +130,7 @@ def validation_rows(done_cells=frozenset()):
             rows.append({
                 "split": "val", "group": g, "ref": f, "scope": scope, "camera": "asi678mc" if scope == "edgehd11" else "imx462c",
                 "d_r0": d_r0(scope, r0), "r0_cm": r0, "night": night, "gain": "medio", "bits": 8, "frames": VAL_FRAMES,
-                "keep": VAL_KEEP, "diam": 44.0, "ground": 0.6,
+                "keep": VAL_KEEP, "diam": VAL_DIAM, "ground": 0.6,
             })
         per_group.append(rows)
     out = []

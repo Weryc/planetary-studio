@@ -307,6 +307,13 @@ pub fn smart_structure(kind: ImageKind, analysis: &Analysis) -> crate::smart::Sm
     let learned_nights = crate::learned::nights(analysis);
     // The subject's network, when there is one for it: offered beside the other curves.
     let (network, network_strength, network_cutoff) = analysis.curve_net.as_ref().map_or((Vec::new(), 0.0, 0.0), |n| (n.table.clone(), n.strength, n.cutoff));
+    // Saturn: the rings' own curve, applied in the background beside the globe's.
+    let (network_rings_cutoff, network_rings_strength, network_rings) = analysis.curve_net.as_ref().and_then(|n| n.rings.clone()).unwrap_or_default();
+    // Saturn with its network: its curve by default, measured on simulated stacks far closer to
+    // the truth than the other curves (0.86 / 0.79 of the best possible on globe / rings against
+    // 0.58 / 0.34), with no edge protection, which only held it back there.
+    let saturn_net = kind == ImageKind::Saturn && !network.is_empty() && analysis.curve_net.as_ref().is_some_and(|n| n.body == crate::capture::Body::Saturn);
+    let (curve, color, limb_protection) = if saturn_net { (SmartCurve::Network, learned_colour(analysis), 0.0) } else { (curve, color, limb_protection) };
     crate::smart::SmartParams {
         cutoff: detail_cutoff(analysis).unwrap_or(0.0),
         peak,
@@ -321,6 +328,9 @@ pub fn smart_structure(kind: ImageKind, analysis: &Analysis) -> crate::smart::Sm
         network,
         network_strength,
         network_cutoff,
+        network_rings,
+        network_rings_strength,
+        network_rings_cutoff,
         ..Default::default()
     }
 }
@@ -357,6 +367,7 @@ pub fn auto_smart(kind: ImageKind, analysis: &Analysis, strength: AutoStrength) 
     // can ask for much more, which on real stacks can leave grain (the slider goes further).
     let (base, cap) = match structure.curve {
         crate::smart::SmartCurve::Learned => (structure.learned_strength, LEARNED_CAP),
+        crate::smart::SmartCurve::Network => (structure.network_strength, LEARNED_CAP),
         _ => (base, 1.0),
     };
     crate::smart::SmartParams { strength: (base * factor).min(cap), ..structure }
@@ -401,7 +412,7 @@ pub fn auto_pipeline_with(kind: ImageKind, analysis: &Analysis, strength: AutoSt
     // deconvolution and the wavelets already did and adds only what is missing (cleaning the
     // grain past the detail). Without a learned answer it stays neutral, as before.
     let smart = auto_smart(kind, analysis, strength);
-    let smart = if smart.curve == crate::smart::SmartCurve::Learned { smart } else { crate::smart::SmartParams { strength: 0.0, ..smart } };
+    let smart = if matches!(smart.curve, crate::smart::SmartCurve::Learned | crate::smart::SmartCurve::Network) { smart } else { crate::smart::SmartParams { strength: 0.0, ..smart } };
     Pipeline {
         align: Module { enabled: worth_aligning, params: shift },
         bxt: Module::off(bxt),

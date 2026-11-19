@@ -334,6 +334,13 @@ pub struct Aux<'a> {
     /// Text and marks laid over the finished image (premultiplied red, green, blue and coverage
     /// planes, each with a generation).
     pub overlay: Option<OverlayPlanes>,
+    /// The guided noise reduction's measures of the whole image and where the source sits in it
+    /// (a zoomed region), so the region is reduced as the whole image is. Without it they are
+    /// measured on the source.
+    pub noise_plan: Option<(Arc<crate::noise_net::NoisePlan>, (usize, usize))>,
+    /// The smart sharpening's measures of the whole image ([`RunOutput::smart_reference`] of a
+    /// whole-image run with the same earlier steps), with a generation, for a zoomed region.
+    pub smart_reference: Option<(Arc<crate::smart::SmartReference>, u64)>,
 }
 
 /// Premultiplied red, green, blue and coverage planes of a layer of marks, at the image's size.
@@ -393,6 +400,13 @@ pub fn masks_for(p: &Pipeline, source: &Image) -> Vec<(u64, Arc<Vec<f32>>, u64)>
     masks
 }
 
+/// Whether the guided noise reduction may run (on the whole image or in a layer): it needs
+/// [`Aux::noise_plan`] for a zoomed region.
+pub fn uses_guided_denoise(p: &Pipeline) -> bool {
+    let guided = |d: &NoiseParams| d.method == crate::enhance::NoiseMethod::Guided;
+    guided(&p.denoise.params) || p.layers.iter().any(|l| guided(&l.denoise.params))
+}
+
 /// Unique identity of an image flowing through the pipeline; equal generations mean equal pixels.
 pub fn next_generation() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -422,6 +436,8 @@ pub struct RunOutput {
     pub ringing: Option<Arc<Vec<f32>>>,
     /// The smart sharpening's map asked for ([`Aux::smart_view`]).
     pub smart_map: Option<Arc<crate::smart::SmartMap>>,
+    /// What the smart sharpening measured, when it ran without [`Aux::smart_reference`].
+    pub smart_reference: Option<Arc<crate::smart::SmartReference>>,
 }
 
 struct Slot<K> {
@@ -448,6 +464,8 @@ fn store<K>(slot: &mut Option<Slot<K>>, input_gen: u64, key: K, image: Image) ->
 struct SmartCache {
     input_gen: u64,
     before_gen: u64,
+    /// Generation of the whole image's measures used (0: measured on the input).
+    reference_gen: u64,
     key: crate::smart::PrepareKey,
     prepared: Arc<crate::smart::Prepared>,
 }
@@ -506,7 +524,7 @@ pub struct Processor {
     ring: Option<(RingKey, FoundRing)>,
     denoise: Option<Slot<NoiseParams>>,
     wavelet: Option<Slot<WaveletParams>>,
-    smart: Option<Slot<(SmartParams, u64, u64)>>,
+    smart: Option<Slot<(SmartParams, u64, u64, u64)>>,
     smart_cache: Option<SmartCache>,
     smart_map: Option<(SmartMapKey, Arc<crate::smart::SmartMap>)>,
     contrast: Option<Slot<ContrastParams>>,
@@ -523,6 +541,8 @@ pub struct Processor {
     suncolor: Option<Slot<SunColorParams>>,
     gamut: Option<Slot<()>>,
     decompositions: Vec<WaveletCache>,
+    /// The guided noise reduction's measures of the source (by its generation).
+    noise_plan: Option<(u64, Option<Arc<crate::noise_net::NoisePlan>>)>,
 }
 
 impl Processor {
@@ -535,6 +555,19 @@ impl Processor {
         let dering_area = aux.masks.iter().find(|(id, ..)| *id == DERING_MASK).map(|(_, plane, generation)| (Arc::clone(plane), *generation));
         let ring_area = aux.masks.iter().find(|(id, ..)| *id == RING_MASK).map(|(_, plane, generation)| (Arc::clone(plane), *generation));
         let colour = !frame.0.is_mono();
+        // The guided noise reduction's measures: given (a zoomed region's whole image), or of
+        // the source, measured once.
+        let noise_plan = if !uses_guided_denoise(p) {
+            None
+        } else if let Some((plan, offset)) = &aux.noise_plan {
+            Some((Arc::clone(plan), *offset))
+        } else {
+            if !matches!(&self.noise_plan, Some((g, _)) if *g == source_gen) {
+                self.noise_plan = Some((source_gen, crate::noise_net::plan(&frame.0).map(Arc::new)));
+            }
+            self.noise_plan.as_ref().and_then(|(_, plan)| plan.clone()).map(|plan| (plan, (0, 0)))
+        };
+        let noise_plan = noise_plan.as_ref().map(|(plan, offset)| (plan.as_ref(), *offset));
 
         // Look the stage up in its slot; compute and store it on a miss.
         macro_rules! stage {
@@ -601,7 +634,7 @@ impl Processor {
 
         let base_denoise = Some(p.denoise.params.clone()).filter(|d| p.denoise.enabled && !d.is_neutral());
         if let Some(d) = &base_denoise {
-            stage!(Stage::Denoise, self.denoise, d.clone(), |img: &Image| Some(enhance::denoise(img, d)));
+            stage!(Stage::Denoise, self.denoise, d.clone(), |img: &Image| Some(enhance::denoise_planned(img, d, noise_plan)));
         }
         let denoised = frame.clone();
 
@@ -620,6 +653,7 @@ impl Processor {
 
         // Shaped by what earlier steps already did: compared with the image before them.
         let smart_input = frame.clone();
+        let mut smart_reference = None;
         let subject = aux.masks.iter().find(|(id, ..)| *id == SMART_MASK).map(|(_, plane, generation)| (Arc::clone(plane), *generation));
         let base_smart = Some(p.smart.params.clone()).filter(|s| p.smart.enabled && !s.is_neutral());
         if let Some(s) = base_smart.clone() {
@@ -629,21 +663,29 @@ impl Processor {
             let mask_gen = mask.map_or(0, |m| m.1);
             let (cache, keep) = (&mut self.smart_cache, !self.memory_saving);
             let (input_gen, before_gen) = (frame.1, unsharpened.1);
-            stage!(Stage::Smart, self.smart, (s.clone(), unsharpened.1, mask_gen), |img: &Image| {
+            let reference = aux.smart_reference.as_ref();
+            let reference_gen = reference.map_or(0, |r| r.1);
+            let mut made = None;
+            stage!(Stage::Smart, self.smart, (s.clone(), unsharpened.1, mask_gen, reference_gen), |img: &Image| {
                 let key = s.prepare_key();
-                let prepared = match cache.as_ref().filter(|c| c.input_gen == input_gen && c.before_gen == before_gen && c.key == key) {
+                let prepared = match cache.as_ref().filter(|c| c.input_gen == input_gen && c.before_gen == before_gen && c.reference_gen == reference_gen && c.key == key) {
                     Some(c) => Arc::clone(&c.prepared),
                     None => {
                         *cache = None;
-                        let prepared = Arc::new(crate::smart::prepare(img, before.as_deref(), &s));
+                        let prepared = Arc::new(crate::smart::prepare_with(img, before.as_deref(), &s, reference.map(|r| r.0.as_ref())));
                         if keep {
-                            *cache = Some(SmartCache { input_gen, before_gen, key, prepared: Arc::clone(&prepared) });
+                            *cache = Some(SmartCache { input_gen, before_gen, reference_gen, key, prepared: Arc::clone(&prepared) });
                         }
                         prepared
                     }
                 };
+                made = Some(Arc::clone(&prepared));
                 Some(crate::smart::apply(&prepared, img, &s, mask.map(|m| m.0.as_slice())))
             });
+            if reference.is_none() {
+                let prepared = made.or_else(|| self.smart_cache.as_ref().filter(|c| c.input_gen == input_gen && c.before_gen == before_gen && c.reference_gen == 0).map(|c| Arc::clone(&c.prepared)));
+                smart_reference = prepared.map(|pr| Arc::new(pr.reference(&s)));
+            }
         }
         if aux.smart_view != crate::smart::SmartView::None {
             // The resolution doesn't depend on the settings that only say how much to sharpen.
@@ -747,7 +789,7 @@ impl Processor {
                     let (mut img, generation) = if key.denoise == base_denoise {
                         ((*denoised.0).clone(), denoised.1)
                     } else {
-                        let img = key.denoise.as_ref().map_or_else(|| (*deconvolved.0).clone(), |d| enhance::denoise(&deconvolved.0, d));
+                        let img = key.denoise.as_ref().map_or_else(|| (*deconvolved.0).clone(), |d| enhance::denoise_planned(&deconvolved.0, d, noise_plan));
                         (img, next_generation())
                     };
                     if let Some(w) = &key.wavelet {
@@ -816,7 +858,7 @@ impl Processor {
                 None => {
                     recomputed = true;
                     let (mut img, generation) = match &key.denoise {
-                        Some(d) => (enhance::denoise(&frame.0, d), next_generation()),
+                        Some(d) => (enhance::denoise_planned(&frame.0, d, noise_plan), next_generation()),
                         None => ((*frame.0).clone(), frame.1),
                     };
                     if let Some(w) = &key.wavelet {
@@ -890,7 +932,7 @@ impl Processor {
         let deconv = if p.deconv.enabled && !p.deconv.params.is_neutral() { self.deconv_report } else { None };
         let ringing = ring_map;
         let smart_map = if aux.smart_view != crate::smart::SmartView::None { self.smart_map.as_ref().map(|(_, m)| Arc::clone(m)) } else { None };
-        Some(RunOutput { image: frame.0, timings, warnings, tone_input, curves_input, deconv, ringing, smart_map })
+        Some(RunOutput { image: frame.0, timings, warnings, tone_input, curves_input, deconv, ringing, smart_map, smart_reference })
     }
 
     /// Forget the results that take only milliseconds to recompute.

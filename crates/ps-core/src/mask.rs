@@ -352,7 +352,13 @@ pub fn saturn_globe(img: &Image) -> Option<Ellipse> {
     let (w, h) = (img.width(), img.height());
     let lum = working_planes(img, ColorMode::Luminance).swap_remove(0);
     let (small, sw, sh, scale) = downsample(&lum, w, h, 512);
-    let threshold = otsu(&small);
+    // Halfway between the sky and Otsu's threshold, as for the subject's mask: Otsu's alone,
+    // on a sharp image, can leave the fainter rings out and split the globe from them, and the
+    // globe alone would then be taken for the ring system.
+    let otsu_t = otsu(&small);
+    let mut sky: Vec<f32> = small.iter().copied().filter(|&v| v <= otsu_t).collect();
+    let sky = if sky.is_empty() { 0.0 } else { let mid = sky.len() / 2; *sky.select_nth_unstable_by(mid, f32::total_cmp).1 };
+    let threshold = sky + 0.5 * (otsu_t - sky);
     let member = largest_component_members(&small.iter().map(|&v| v > threshold).collect::<Vec<_>>(), sw, sh)?;
 
     let n = member.len() as f32;
@@ -368,7 +374,12 @@ pub fn saturn_globe(img: &Image) -> Option<Ellipse> {
     let angle = 0.5 * (2.0 * cxy).atan2(cxx - cyy);
     let (s, c) = angle.sin_cos();
     let half_length = member.iter().map(|&(x, y)| ((x - mx) * c + (y - my) * s).abs()).fold(0.0f32, f32::max) + 0.5;
-    let rx = half_length * scale / SATURN_RING_TO_GLOBE;
+    let half_width = member.iter().map(|&(x, y)| (-(x - mx) * s + (y - my) * c).abs()).fold(0.0f32, f32::max) + 0.5;
+    // Rings too faint to reach the threshold (near edge-on, or dark as in 1995–96 and 2025):
+    // the region is the globe alone, nearly round, where the ring system, even fully open as
+    // seen from Earth, is at most about half as tall as it is wide.
+    let ring_to_globe = if half_width > 0.75 * half_length { 1.0 } else { SATURN_RING_TO_GLOBE };
+    let rx = half_length * scale / ring_to_globe;
     Some(Ellipse { cx: mx * scale, cy: my * scale, rx, ry: rx * SATURN_OBLATENESS, angle })
 }
 
