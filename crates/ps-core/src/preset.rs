@@ -1,0 +1,804 @@
+//! Automatic processing settings for each kind of image, adapted to the measured noise, blur
+//! and subject size.
+//!
+//! Two tiers:
+//! - **structural** settings (wavelet kernel, number of levels, first step, PSF shape and size,
+//!   noise-reduction method) follow from the analysis and are always chosen automatically;
+//! - **simple** settings (how much sharpening, how much noise reduction) are left to the user,
+//!   or filled in on request by [`auto_pipeline`].
+
+use crate::i18n::tl;
+use crate::tr;
+use crate::adjust::ColorParams;
+use crate::analysis::{Analysis, ImageKind};
+use crate::bxt::BxtParams;
+use crate::color::ColorMode;
+use crate::deconv::DeconvParams;
+use crate::dering::{DeringParams, DeringRegion};
+use crate::enhance::{ContrastParams, ToneParams, ToneStep};
+use crate::enhance::{NoiseMethod, NoiseParams};
+use crate::mask::{AutoRegion, MaskShape, MaskSpec};
+use crate::pipeline::LayerRole;
+use crate::pipeline::{Module, Pipeline};
+use crate::psf::Psf;
+use crate::wavelet::{MAX_LAYERS, ScaleMode, WaveletKernel, WaveletLayer, WaveletParams};
+use serde::{Deserialize, Serialize};
+
+struct Base {
+    psf_sigma: f32,
+    iterations: u32,
+    tv_lambda: f32,
+    damping: f32,
+    gains: [f32; 6],
+    denoise: [f32; 6],
+    noise: NoiseParams,
+}
+
+fn base(kind: ImageKind) -> Base {
+    match kind {
+        ImageKind::Planet => Base {
+            psf_sigma: 1.5,
+            iterations: 15,
+            tv_lambda: 0.0015,
+            damping: 1.0,
+            gains: [1.6, 1.2, 0.6, 0.2, 0.0, 0.0],
+            denoise: [1.2, 0.6, 0.0, 0.0, 0.0, 0.0],
+            // Fine grain over soft belts: multiscale thresholding, clean colour, black sky.
+            noise: NoiseParams { method: NoiseMethod::Planetary, strength: 1.0, detail: 0.3, chroma: 2, sky: 0.8 },
+        },
+        // Rings and the Cassini division ring easily: gentler on both steps.
+        ImageKind::Saturn => Base {
+            psf_sigma: 1.3,
+            iterations: 12,
+            tv_lambda: 0.002,
+            damping: 1.2,
+            gains: [1.2, 1.0, 0.5, 0.1, 0.0, 0.0],
+            denoise: [1.4, 0.7, 0.0, 0.0, 0.0, 0.0],
+            // Thin ring divisions are small-scale detail: a little gentler.
+            noise: NoiseParams { method: NoiseMethod::Planetary, strength: 0.8, detail: 0.3, chroma: 2, sky: 0.8 },
+        },
+        // The sharp limb against black sky rings first; keep deconvolution moderate.
+        ImageKind::FullDisk => Base {
+            psf_sigma: 1.2,
+            iterations: 10,
+            tv_lambda: 0.001,
+            damping: 1.0,
+            gains: [1.0, 0.9, 0.5, 0.25, 0.0, 0.0],
+            denoise: [1.0, 0.5, 0.0, 0.0, 0.0, 0.0],
+            // Crater rims and limb must stay crisp; the sky around the disk can be cleaned hard.
+            noise: NoiseParams { method: NoiseMethod::Lunar, strength: 1.0, detail: 0.3, chroma: 1, sky: 0.9 },
+        },
+        // Craters and granulation span many scales; no limb to protect.
+        ImageKind::Surface => Base {
+            psf_sigma: 1.6,
+            iterations: 20,
+            tv_lambda: 0.0015,
+            damping: 1.0,
+            gains: [1.4, 1.1, 0.6, 0.3, 0.1, 0.0],
+            denoise: [1.2, 0.6, 0.0, 0.0, 0.0, 0.0],
+            // Texture everywhere and no sky: edge-preserving, keep more fine detail.
+            noise: NoiseParams { method: NoiseMethod::Lunar, strength: 0.8, detail: 0.4, chroma: 1, sky: 0.0 },
+        },
+    }
+}
+
+/// Measured blur for `kind`, or the kind's typical value. The limb estimate is only trusted
+/// for the kind it was measured on, and is scaled down: an overestimated PSF causes ringing,
+/// an underestimated one merely under-sharpens.
+fn psf_sigma(kind: ImageKind, analysis: &Analysis) -> f32 {
+    analysis.psf_sigma.filter(|_| kind == analysis.kind).map_or(base(kind).psf_sigma, |s| (0.85 * s).clamp(0.6, 3.5))
+}
+
+/// Core of the blur, as a Gaussian σ (px): from the frequency where the detail ends (the σ
+/// whose MTF is down to 10 % there), else the limb or typical value of [`psf_sigma`].
+///
+/// On real stacks the limb's profile is much wider than the blur of the detail: limb darkening
+/// and the seeing's wide wings widen it. A PSF that wide over-deconvolves the detail into
+/// blotches and outlines; the core from the spectrum, with Moffat wings, doesn't.
+fn blur_core(kind: ImageKind, analysis: &Analysis) -> f32 {
+    match analysis.spectral.and(detail_cutoff(analysis)) {
+        Some(cutoff) => (0.3416 / cutoff).clamp(0.6, 4.0),
+        None => psf_sigma(kind, analysis),
+    }
+}
+
+/// Moffat β of the deconvolution PSF with a core from the spectrum: the limb's when it showed
+/// wide wings, else 2 (stacks of short exposures through turbulence have wings well beyond a
+/// Gaussian's).
+fn moffat_beta(kind: ImageKind, analysis: &Analysis) -> f32 {
+    analysis.psf_moffat.filter(|_| kind == analysis.kind).map_or(2.0, |(_, beta)| beta).clamp(1.5, 3.0)
+}
+
+/// Noisier data → stronger denoising and damping; very clean data → lighter.
+/// The automatic noise reduction. With the noise network in this build, that: it measures the
+/// noise itself, so only the chosen strength scales it (a little gentler on Saturn's thin ring
+/// divisions), and a tenth of the fine texture goes back so surfaces don't look waxy. Without
+/// it, the classic method for the kind, scaled by the signal-to-noise ratio.
+fn auto_noise(kind: ImageKind, analysis: &Analysis, cleaning: f32) -> NoiseParams {
+    let b = base(kind).noise;
+    if crate::denoise_net::available() {
+        let strength = if kind == ImageKind::Saturn { 0.9 } else { 1.0 };
+        NoiseParams { method: NoiseMethod::Guided, strength: strength * cleaning, detail: 0.1, ..b }
+    } else {
+        NoiseParams { strength: b.strength * noise_factor(analysis) * cleaning, ..b }
+    }
+}
+
+fn noise_factor(analysis: &Analysis) -> f32 {
+    (60.0 / analysis.snr.max(1.0)).clamp(0.6, 2.0)
+}
+
+/// Size of the first free-scale layer: the layer peaks at 0.3/size cycles/px, so it sits on
+/// the frequency where the detail sinks into the noise (on test images whose sharp version is
+/// known, that is where the best results were). Without a spectrum, from the blur.
+pub fn first_scale(kind: ImageKind, analysis: &Analysis) -> f32 {
+    let size = match detail_cutoff(analysis) {
+        Some(cutoff) => 0.3 / cutoff.max(0.05),
+        None => 0.8 * psf_sigma(kind, analysis),
+    };
+    (size.clamp(1.0, 4.0) * 20.0).round() / 20.0
+}
+
+/// Finest frequency with real detail (cycles/px): where the spectrum sinks into the noise, and
+/// never past what the telescope can resolve. With the equipment but no spectrum, a little
+/// below the diffraction limit (the seeing always takes some).
+pub fn detail_cutoff(analysis: &Analysis) -> Option<f32> {
+    let optical = analysis.optics.map(|o| o.cutoff);
+    match (analysis.spectral.map(|s| s.cutoff), optical) {
+        (Some(s), Some(o)) => Some(s.min(o)),
+        (Some(s), None) => Some(s),
+        (None, Some(o)) => Some(0.8 * o),
+        (None, None) => None,
+    }
+}
+
+/// Signal over noise power at `f` cycles/px: measured, or assumed well above the noise up to
+/// `cutoff` and absent beyond; never any past the diffraction limit.
+fn signal_to_noise(analysis: &Analysis, cutoff: f32) -> impl Fn(f32) -> f32 + '_ {
+    move |f: f32| {
+        if analysis.optics.is_some_and(|o| f > o.cutoff) {
+            return 0.0;
+        }
+        analysis.spectral.map_or(if f < cutoff { 100.0 } else { 0.0 }, |s| s.snr(f))
+    }
+}
+
+/// Wavelet transform shape from the image, with `scales` free or classic (the user's choice;
+/// [`ScaleMode::Linear`] counts as classic): enough levels for the coarsest to reach about a
+/// tenth of the subject. Free scales start at [`first_scale`]. Classic ones (whose settings are
+/// filled in either way, for a later switch) start with a step of 2 px when the image is
+/// oversampled (σ > 2.6, the finest scale then holds only noise) and use the narrower linear
+/// kernel when it is undersampled.
+pub fn wavelet_structure(kind: ImageKind, analysis: &Analysis, scales: ScaleMode) -> WaveletParams {
+    let sigma = psf_sigma(kind, analysis);
+    let base_step: u32 = if sigma > 2.6 { 2 } else { 1 };
+    let first = first_scale(kind, analysis);
+    let free = scales == ScaleMode::Free;
+    let coarsest = (analysis.subject_size / 10.0).max(4.0) / if free { first } else { base_step as f32 };
+    let levels = (coarsest.log2().floor() as usize + 1).clamp(4, MAX_LAYERS);
+    WaveletParams {
+        kernel: if sigma < 1.0 { WaveletKernel::Linear } else { WaveletKernel::B3Spline },
+        scale_mode: if free { ScaleMode::Free } else { ScaleMode::Dyadic },
+        base_step,
+        first_scale: first,
+        layers: vec![WaveletLayer::default(); levels],
+        // Detail must clear the noise by ~2σ to get the full gain.
+        noise_adaptive: 2.0,
+        // A disk on black sky halos at the limb; a surface has no such edge.
+        edge_protection: match kind {
+            ImageKind::Saturn => 0.6,
+            ImageKind::Planet | ImageKind::FullDisk => 0.5,
+            ImageKind::Surface => 0.2,
+        },
+        ..Default::default()
+    }
+}
+
+/// Deconvolution's anti-ringing area (kept with the deringing settings) from the blur.
+pub fn dering_structure(kind: ImageKind, analysis: &Analysis) -> DeringParams {
+    let mut d = DeringParams::for_blur(blur_core(kind, analysis));
+    // On Saturn the ring edges and divisions are real sharp detail: the globe's limb only.
+    d.region = if kind == ImageKind::Saturn { DeringRegion::Globe } else { DeringRegion::Subject };
+    d
+}
+
+/// Limb rings only form where there is a limb.
+fn has_limb(kind: ImageKind) -> bool {
+    kind != ImageKind::Surface
+}
+
+/// How hard the automatic settings push.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutoStrength {
+    /// Natural, almost free of artefacts.
+    Gentle,
+    #[default]
+    Normal,
+    /// As much detail as the data holds.
+    Strong,
+}
+
+impl AutoStrength {
+    pub fn label(self) -> &'static str {
+        match self {
+            AutoStrength::Gentle => tl("Delicato"),
+            AutoStrength::Normal => tl("Normale"),
+            AutoStrength::Strong => tl("Forte"),
+        }
+    }
+
+    /// (maximum deconvolution iterations, wavelet gains, noise reduction) relative to the
+    /// kind's typical settings. Iterations stop on their own at the noise in every case.
+    fn factors(self) -> (f32, f32, f32) {
+        match self {
+            AutoStrength::Gentle => (0.8, 0.6, 1.25),
+            AutoStrength::Normal => (2.0, 1.0, 1.0),
+            AutoStrength::Strong => (4.0, 1.5, 0.85),
+        }
+    }
+}
+
+/// Deconvolution's structure from the analysis: PSF shape and size (a Moffat when the limb
+/// shows wide wings), one PSF size per channel when the channels' blur differs, automatic
+/// stop and anti-ringing on a disk's limb. Amounts are left at the kind's typical values.
+pub fn deconv_structure(kind: ImageKind, analysis: &Analysis) -> DeconvParams {
+    let b = base(kind);
+    let sigma = psf_sigma(kind, analysis);
+    // Measurements are only trusted for the kind they were made on.
+    let ours = kind == analysis.kind;
+    let psf = if analysis.spectral.is_some() {
+        Psf::Moffat { fwhm: 2.3548 * blur_core(kind, analysis), beta: moffat_beta(kind, analysis) }
+    } else {
+        match analysis.psf_moffat.filter(|_| ours) {
+            Some((fwhm, beta)) => Psf::Moffat { fwhm: (0.85 * fwhm).clamp(1.0, 9.0), beta },
+            None => Psf::Gaussian { sigma },
+        }
+    };
+    let per_channel = analysis.channel_sigma.filter(|_| ours).zip(analysis.psf_sigma).map(|(c, lum)| c.map(|v| (v / lum).clamp(0.7, 1.4)));
+    let (color, channel_scale) = match per_channel {
+        // Worth three deconvolutions only when the channels' blur clearly differs.
+        Some(scale) if scale.iter().any(|v| (v - 1.0).abs() > 0.12) => (ColorMode::Rgb, scale),
+        _ => (ColorMode::Luminance, [1.0; 3]),
+    };
+    DeconvParams {
+        psf,
+        iterations: b.iterations,
+        tv_lambda: b.tv_lambda,
+        damping: b.damping,
+        color,
+        channel_scale,
+        auto_stop: true,
+        deringing: if has_limb(kind) { 0.5 } else { 0.0 },
+        ..Default::default()
+    }
+}
+
+/// Limb protection on Saturn and on the other planets: (strength, width as a multiple of the
+/// halo). Wider than the halo alone: stacks grain up along the limb (worse alignment there),
+/// which the simulated references don't have. Measured (`ml_zone`, `ml_zone_real`): on the
+/// user's Saturns the grain added near the limb over the centre's goes from 0.42–0.51 to
+/// 0.37–0.41 (BlurXTerminator 0.38–0.41), on Jupiter from 0.42 to 0.38; the simulated error in
+/// the outer ring rises 0.585 → 0.67 on Saturn, 0.398 → 0.41 on planets, the centre unchanged.
+pub const SATURN_LIMB: (f32, f32) = (0.45, 2.0);
+pub const PLANET_LIMB: (f32, f32) = (0.3, 2.0);
+
+/// Moon close-ups: below this share of the bright level the sharpening can't push the image
+/// under the darkest original nearby (see [`crate::smart::SmartParams::sky_floor`]).
+pub const SURFACE_DARK_FLOOR: f32 = 0.25;
+/// Saturn (and Mars with its network): the sky beside the globe and the rings is held between the darkest and the
+/// brightest original values nearby, where the image is darker than this share of its bright
+/// level. The sharpening, with no edge protection, dug a black band and raised a streaky,
+/// coloured glow of sky noise there on real stacks; on simulated ones holding it costs 0.3 %
+/// of the error over the subject.
+pub const SATURN_SKY_HOLD: f32 = 0.06;
+
+/// "Nitidezza intelligente" for the image: the cut-off from the analysis and the equipment,
+/// where to put the peak, how much to spare the limb and whether there is a sky to leave out,
+/// by kind of subject. Planets' belts
+/// and festoons, the Moon's crater rims and the Sun's filaments carry real detail almost up to
+/// the cut-off; a disk on black sky halos at its limb, a surface has no limb.
+pub fn smart_structure(kind: ImageKind, analysis: &Analysis) -> crate::smart::SmartParams {
+    let (peak, limb_protection, limb_width) = match kind {
+        // Low: inside the disk it changes nothing and the limb rarely needs much; the map in
+        // the card shows where it acts, so it can be raised where halos appear.
+        ImageKind::Planet => (1.0, PLANET_LIMB.0, PLANET_LIMB.1),
+        // Wider and stronger: stacks grain up along Saturn's limb and ring edges.
+        ImageKind::Saturn => (1.0, SATURN_LIMB.0, SATURN_LIMB.1),
+        ImageKind::FullDisk => (1.0, 0.2, 1.0),
+        ImageKind::Surface => (1.0, 0.0, 1.0),
+    };
+    // A surface has no sky: its dark parts are shadows, part of the subject.
+    let include_sky = kind == ImageKind::Surface;
+    // The shape the learned model picks for this image, when it has an answer.
+    use crate::smart::SmartCurve;
+    let (learned_strength, learned) = crate::learned::smart_curve(analysis).unwrap_or_default();
+    let learned_nights = crate::learned::nights(analysis);
+    // The subject's network, when there is one for it: offered beside the other curves.
+    let (network, network_strength, network_cutoff) = analysis.curve_net.as_ref().map_or((Vec::new(), 0.0, 0.0), |n| (n.table.clone(), n.strength, n.cutoff));
+    // Saturn: the rings' own curve, applied in the background beside the globe's.
+    let (network_rings_cutoff, network_rings_strength, network_rings) = analysis.curve_net.as_ref().and_then(|n| n.rings.clone()).unwrap_or_default();
+    // Saturn with its network: its curve by default, measured on simulated stacks far closer to
+    // the truth than the other curves (0.86 / 0.79 of the best possible on globe / rings against
+    // 0.58 / 0.34), with no edge protection, which only held it back there.
+    let saturn_net = kind == ImageKind::Saturn && !network.is_empty() && analysis.curve_net.as_ref().is_some_and(|n| n.body == crate::capture::Body::Saturn);
+    // A Moon close-up with its network: the same, measured on 136 simulated stacks (0.91 of the
+    // best possible against 0.81 with the curve for a surface).
+    let moon_net = kind == ImageKind::Surface && !network.is_empty() && analysis.curve_net.as_ref().is_some_and(|n| n.body == crate::capture::Body::Moon);
+    // Mars with its network: no edge protection either, the sky held instead (below). Its disk is
+    // small, so the band the protection holds back is a large share of it: on 37 simulated stacks
+    // the network went from 0.71 of the way to the best curve with it to 0.83 without (0.87 as an
+    // ideal band filter); the sky hold keeps the black ring that leaves beside the limb away.
+    let mars_net = !network.is_empty() && analysis.curve_net.as_ref().is_some_and(|n| n.body == crate::capture::Body::Mars);
+    let sky_hold = kind == ImageKind::Saturn || mars_net;
+    // Any other subject with its network (Jupiter): its curve by default too, with the usual edge
+    // protection. The older curve learned from the references is never picked any more: a
+    // subject without a network gets the standard one.
+    let (curve, color, limb_protection) = if saturn_net || moon_net || mars_net {
+        (SmartCurve::Network, learned_colour(analysis), 0.0)
+    } else if !network.is_empty() {
+        (SmartCurve::Network, learned_colour(analysis), limb_protection)
+    } else {
+        (SmartCurve::Standard, crate::color::ColorMode::Luminance, limb_protection)
+    };
+    crate::smart::SmartParams {
+        cutoff: detail_cutoff(analysis).unwrap_or(0.0),
+        peak,
+        sky_floor: match kind {
+            ImageKind::Surface => SURFACE_DARK_FLOOR,
+            _ if sky_hold => SATURN_SKY_HOLD,
+            _ => 0.0,
+        },
+        // Saturn and Mars: also no glow of amplified sky noise beside the rings and the limb.
+        sky_ceiling: sky_hold,
+        limb_protection,
+        limb_width,
+        include_sky,
+        curve,
+        learned,
+        learned_strength,
+        learned_nights,
+        color,
+        network,
+        network_strength,
+        network_cutoff,
+        network_body: analysis.curve_net.as_ref().map(|n| n.body),
+        network_rings,
+        network_rings_strength,
+        network_rings_cutoff,
+        ..Default::default()
+    }
+}
+
+/// Highest strength the automatic sharpening takes from the learned model.
+pub const LEARNED_CAP: f32 = 1.2;
+
+/// The automatic strength's cap with a subject's network: [`LEARNED_CAP`], but Mars's full range.
+/// Mars asks for boosts of ×20–60 on its fine detail (its disk is small, its detail faint); held
+/// at 1.2 its network did worse on the simulated stacks than the app without it (0.61 against
+/// 0.68 of the way to the best curve), at 2.0 better (0.74–0.76).
+pub fn network_cap(body: Option<crate::capture::Body>) -> f32 {
+    if body == Some(crate::capture::Body::Mars) { crate::smart::MAX_STRENGTH } else { LEARNED_CAP }
+}
+
+/// How the learned curve treats colour: R, G and B each on a colour planet (its colour detail is
+/// blurred by the seeing as much as its brightness: on luminance alone the colours stay soft),
+/// luminance only on surfaces and full disks (their colour is mostly noise: per channel it
+/// fringes).
+pub fn learned_colour(analysis: &Analysis) -> crate::color::ColorMode {
+    match analysis.kind {
+        ImageKind::Planet | ImageKind::Saturn if analysis.colour => crate::color::ColorMode::Rgb,
+        _ => crate::color::ColorMode::Luminance,
+    }
+}
+
+/// The automatic "Nitidezza intelligente": the structure with a strength by kind and by how
+/// hard the user wants it pushed. With the learned curve it is also part of the full automatic
+/// processing (after the deconvolution and the wavelets, adding what they left out).
+pub fn auto_smart(kind: ImageKind, analysis: &Analysis, strength: AutoStrength) -> crate::smart::SmartParams {
+    let base: f32 = match kind {
+        ImageKind::Surface | ImageKind::FullDisk => 0.4,
+        _ => 0.35,
+    };
+    let factor = match strength {
+        AutoStrength::Gentle => 0.7,
+        AutoStrength::Normal => 1.0,
+        AutoStrength::Strong => 1.4,
+    };
+    let structure = smart_structure(kind, analysis);
+    // With the learned shape, its own height, up to a little past BlurXTerminator's: the model
+    // can ask for much more, which on real stacks can leave grain (the slider goes further).
+    let (base, cap) = match structure.curve {
+        crate::smart::SmartCurve::Learned => (structure.learned_strength, LEARNED_CAP),
+        crate::smart::SmartCurve::Network => (structure.network_strength, network_cap(structure.network_body)),
+        _ => (base, 1.0),
+    };
+    crate::smart::SmartParams { strength: (base * factor).min(cap), ..structure }
+}
+
+/// The automatic deconvolution: [`deconv_structure`] with as many iterations at most as
+/// `strength` says, and damping following the noise.
+pub fn auto_deconv(kind: ImageKind, analysis: &Analysis, strength: AutoStrength) -> DeconvParams {
+    let b = base(kind);
+    let (iterations, ..) = strength.factors();
+    DeconvParams { iterations: (b.iterations as f32 * iterations).round() as u32, damping: b.damping * noise_factor(analysis), ..deconv_structure(kind, analysis) }
+}
+
+/// Everything automatic, simple settings included: what the "Automatico" buttons apply.
+pub fn auto_pipeline(kind: ImageKind, analysis: &Analysis) -> Pipeline {
+    auto_pipeline_with(kind, analysis, AutoStrength::Normal, ScaleMode::Free)
+}
+
+/// [`auto_pipeline`] pushing as hard as `strength` says.
+pub fn auto_pipeline_with(kind: ImageKind, analysis: &Analysis, strength: AutoStrength, scales: ScaleMode) -> Pipeline {
+    let b = base(kind);
+    let noise = noise_factor(analysis);
+    let sigma = blur_core(kind, analysis);
+    let (_, gains, cleaning) = strength.factors();
+    let deconv = auto_deconv(kind, analysis, strength);
+    // The tables are tuned for the classic scales, with single-pixel first steps (shifted with
+    // the first step).
+    let mut classic = wavelet_structure(kind, analysis, ScaleMode::Dyadic);
+    for (j, layer) in classic.layers.iter_mut().enumerate() {
+        let k = j + classic.base_step as usize - 1;
+        // The noise-reduction module does most of the work; wavelets keep a lighter touch.
+        *layer = WaveletLayer { gain: gains * b.gains.get(k).copied().unwrap_or(0.0), denoise: 0.5 * b.denoise.get(k).copied().unwrap_or(0.0) * noise, ..Default::default() };
+    }
+    // Free scales sharpen the real detail as much as the classic ones would.
+    let wavelet = if scales == ScaleMode::Free { convert_scales(kind, analysis, &classic, ScaleMode::Free) } else { classic };
+    // Below ~0.25 px the measurement is within its noise and the dispersion invisible.
+    let shift = analysis.rgb_shift.unwrap_or_default();
+    let worth_aligning = shift.red.iter().chain(&shift.blue).any(|v| v.abs() > 0.25);
+    // BlurXTerminator's nonstellar PSF diameter is a FWHM: 2.355 σ.
+    let bxt = BxtParams { psf_diameter: (2.3548 * sigma).clamp(0.5, 8.0), ..Default::default() };
+    // The final sharpening brings the whole to the learned curve: it measures what the
+    // deconvolution and the wavelets already did and adds only what is missing (cleaning the
+    // grain past the detail). Without a learned answer it stays neutral, as before.
+    let smart = auto_smart(kind, analysis, strength);
+    let smart = if matches!(smart.curve, crate::smart::SmartCurve::Learned | crate::smart::SmartCurve::Network) { smart } else { crate::smart::SmartParams { strength: 0.0, ..smart } };
+    Pipeline {
+        align: Module { enabled: worth_aligning, params: shift },
+        bxt: Module::off(bxt),
+        deconv: Module::on(deconv),
+        denoise: Module::on(auto_noise(kind, analysis, cleaning)),
+        wavelet: Module::on(wavelet),
+        smart: Module::on(smart),
+        // It does nothing until the user paints over a ring.
+        dering: Module::on(dering_structure(kind, analysis)),
+        ..Default::default()
+    }
+}
+
+/// `current` with the other kind of scales (`to`; [`ScaleMode::Linear`] counts as classic):
+/// the transform derived from the image again, gains giving the same sharpening of the real
+/// detail (finer than the cut-off there is only noise, which free scales leave alone), noise
+/// thresholds moved to the matching layer (the classic finest layer's ↔ the grain). The
+/// user's other choices stay.
+pub fn convert_scales(kind: ImageKind, analysis: &Analysis, current: &WaveletParams, to: ScaleMode) -> WaveletParams {
+    let structure = wavelet_structure(kind, analysis, to);
+    let mut out = WaveletParams {
+        kernel: structure.kernel,
+        scale_mode: structure.scale_mode,
+        base_step: structure.base_step,
+        first_scale: structure.first_scale,
+        grain_denoise: 0.0,
+        layers: structure.layers.clone(),
+        ..current.clone()
+    };
+    let cutoff = detail_cutoff(analysis).unwrap_or(0.3 / structure.first_scale);
+    let snr = signal_to_noise(analysis, cutoff);
+    let unit = WaveletParams { amplify: 1.0, ..current.clone() };
+    let gains = crate::wavelet::equivalent_gains(&unit, &out, cutoff, &snr);
+    // Thresholds by scale: finest first, the grain counting as the finest of free scales.
+    let mut thresholds: Vec<f32> = current.layers.iter().map(|l| l.denoise).collect();
+    if current.scale_mode == ScaleMode::Free {
+        thresholds.insert(0, current.grain_denoise);
+    }
+    if out.scale_mode == ScaleMode::Free && !thresholds.is_empty() {
+        out.grain_denoise = thresholds.remove(0);
+    }
+    for (j, layer) in out.layers.iter_mut().enumerate() {
+        *layer = WaveletLayer { gain: gains[j], denoise: thresholds.get(j).copied().unwrap_or(0.0), ..Default::default() };
+    }
+    out
+}
+
+/// Starting point after opening an image: structural settings chosen automatically, every
+/// module switched on but set to change nothing, so moving any control acts at once. BXT, an
+/// external program, stays off; so does the deconvolution, which has no amount to start from
+/// zero (its PSF and iterations are automatic): switching it on applies it as set up. The user
+/// (or an "Automatico" button) does the rest.
+pub fn initial_pipeline(kind: ImageKind, analysis: &Analysis, scales: ScaleMode) -> Pipeline {
+    let auto = auto_pipeline(kind, analysis);
+    nothing_applied(Pipeline {
+        bxt: Module::off(auto.bxt.params),
+        deconv: Module::on(auto.deconv.params),
+        denoise: Module::on(auto.denoise.params),
+        wavelet: Module::on(wavelet_structure(kind, analysis, scales)),
+        smart: Module::on(smart_structure(kind, analysis)),
+        dering: Module::on(dering_structure(kind, analysis)),
+        ..Default::default()
+    })
+}
+
+/// The automatic settings, the same ones the application opens an image with when it is asked
+/// to open them pre-processed, and what the "automatic adjustments" switch applies: the learned
+/// sharpening (full height at normal strength), the learned noise reduction at half strength,
+/// the photometric colour (Jupiter, Saturn, Mars) or, for the other planets, the camera's colour cast taken out,
+/// levels with black and white close to (not at) the ends, and the colour channels realigned
+/// when the dispersion is measurable. Deconvolution and wavelets stay at "nothing applied".
+pub fn preprocessed(kind: ImageKind, analysis: &Analysis, source: &crate::Image, body: Option<crate::capture::Body>, strength: AutoStrength, scales: ScaleMode) -> Pipeline {
+    let mut p = initial_pipeline(kind, analysis, scales);
+    let auto = auto_pipeline_with(kind, analysis, strength, scales);
+    let factor = match strength {
+        AutoStrength::Gentle => 0.7,
+        AutoStrength::Normal => 1.0,
+        AutoStrength::Strong => 1.2,
+    };
+    // Without an answer learned for the subject the standard curve gets the usual moderate
+    // amount rather than none.
+    p.smart.params.strength = match p.smart.params.curve {
+        crate::smart::SmartCurve::Learned | crate::smart::SmartCurve::Network => factor,
+        _ => auto_smart(kind, analysis, strength).strength,
+    };
+    p.denoise = Module::on(auto.denoise.params);
+    if p.denoise.params.method == NoiseMethod::Guided {
+        p.denoise.params.strength = 0.5 * factor;
+    }
+    // The colour channels line up again when they are off by more than a quarter of a pixel.
+    p.align = auto.align;
+    if !source.is_mono() {
+        // Jupiter, Saturn and Mars have reference colours of their own.
+        if let Some(reference) = body.and_then(|b| crate::photocolor::Reference::for_body(b).first().copied()) {
+            p.photocolor = Module::on(crate::photocolor::PhotoColorParams { reference, ..Default::default() });
+        } else if matches!(kind, ImageKind::Planet | ImageKind::Saturn) {
+            p.color = Module::on(ColorParams { balance: auto_color(kind, source), ..p.color.params.clone() });
+        }
+    }
+    let (black, white) = crate::enhance::gentle_levels(source);
+    let mut tone = p.tone.params.clone();
+    (tone.current.black, tone.current.white) = (black, white);
+    p.tone = Module::on(tone);
+    p
+}
+
+/// Generic starting values, nothing taken from the image: what "Rimuovi impostazioni
+/// automatiche" goes back to.
+pub fn neutral_pipeline() -> Pipeline {
+    nothing_applied(Pipeline::default())
+}
+
+/// `p` with every module on and every amount at "no change" (structure kept).
+fn nothing_applied(p: Pipeline) -> Pipeline {
+    let d = Pipeline::default();
+    Pipeline {
+        align: Module::on(Default::default()),
+        bxt: Module::off(p.bxt.params),
+        // Deconvolution has no amount: it waits switched off, already set up.
+        deconv: Module::off(p.deconv.params),
+        denoise: Module::on(NoiseParams { strength: 0.0, chroma: 0, sky: 0.0, ..p.denoise.params }),
+        wavelet: Module::on(WaveletParams { layers: vec![WaveletLayer::default(); p.wavelet.params.layers.len()], amplify: 1.0, grain_denoise: 0.0, ..p.wavelet.params }),
+        smart: Module::on(crate::smart::SmartParams { strength: 0.0, ..p.smart.params }),
+        contrast: Module::on(ContrastParams { amount: 0.0, local_amount: 0.0, ..d.contrast.params }),
+        // Neutral until a ring is painted.
+        dering: Module::on(p.dering.params),
+        tone: Module::on(ToneParams::default()),
+        curves: Module::on(ToneParams::default()),
+        color: Module::on(ColorParams::default()),
+        // Off, but ready: switching it on gives Hubble 2021 at full intensity.
+        photocolor: Module::off(crate::photocolor::PhotoColorParams::default()),
+        mineral: Module::on(crate::adjust::MineralParams::neutral()),
+        suncolor: Module::on(crate::suncolor::SunColorParams::neutral()),
+        layers: p.layers,
+    }
+}
+
+/// Automatic white balance for the kind of image. The Moon is nearly grey, so its average
+/// colour is made neutral; planets have colours of their own (Saturn's pale yellow, Mars'
+/// orange), so only half of the correction is applied in log terms: the camera's cast goes,
+/// the planet's hue stays.
+pub fn auto_color(kind: ImageKind, img: &crate::Image) -> [f32; 3] {
+    let gains = crate::adjust::auto_balance(img);
+    match kind {
+        ImageKind::FullDisk | ImageKind::Surface => gains,
+        ImageKind::Planet | ImageKind::Saturn => gains.map(f32::sqrt),
+    }
+}
+
+/// Add the layer behind the "Anelli di Saturno" or "Lune" card, set up for its job.
+pub fn add_role_layer(p: &mut Pipeline, role: LayerRole) -> u64 {
+    let (name, region, feather) = match role {
+        LayerRole::Rings => (tl("Anelli di Saturno"), AutoRegion::SaturnRings, 2.0),
+        LayerRole::Moons => (tl("Lune"), AutoRegion::Moons, 1.5),
+    };
+    let id = p.add_layer(name, MaskSpec::new(MaskShape::Auto(region), feather));
+    let base_wavelet = p.wavelet.params.clone();
+    let (denoise, contrast, smart, tone, color) = (p.denoise.params.clone(), p.contrast.params.clone(), p.smart.params.clone(), p.tone.params.clone(), p.color.params.clone());
+    let layer = p.layer_mut(id).expect("just added");
+    layer.role = Some(role);
+    // These masks redo the finishing with their own settings, built from the whole image's.
+    layer.additive = false;
+    (layer.denoise.params, layer.contrast.params, layer.smart.params, layer.tone.params, layer.color.params) = (denoise, contrast, smart, tone, color);
+    let mut wavelet = base_wavelet;
+    let gains: &[f32] = match role {
+        // Ring divisions and ringlets sit at 2–4 px: favour those scales.
+        LayerRole::Rings => &[1.0, 1.6, 0.9, 0.2],
+        // Moons are a few pixels wide: a little crispness, nothing coarse.
+        LayerRole::Moons => &[0.8, 0.5],
+    };
+    for (j, l) in wavelet.layers.iter_mut().enumerate() {
+        l.gain = gains.get(j).copied().unwrap_or(0.0);
+    }
+    layer.wavelet = Module::on(wavelet);
+    match role {
+        LayerRole::Rings => layer.contrast = Module::on(ContrastParams { amount: 0.4, radius: 1.5, ..Default::default() }),
+        // Moons are much fainter than the planet: lift their midtones.
+        LayerRole::Moons => layer.tone = Module::on(ToneParams { current: ToneStep { gamma: 1.5, ..Default::default() }, applied: vec![] }),
+    }
+    id
+}
+
+/// Why the automatic (structural) settings are what they are, for this image: one short
+/// paragraph per point, shown under "Avanzate".
+pub struct Explanation {
+    pub deconv: Vec<String>,
+    pub wavelet: Vec<String>,
+    pub denoise: Vec<String>,
+    pub bxt: Vec<String>,
+    pub dering: Vec<String>,
+}
+
+pub fn explain(kind: ImageKind, analysis: &Analysis, scales: ScaleMode) -> Explanation {
+    let b = base(kind);
+    let sigma = psf_sigma(kind, analysis);
+    let what = match kind {
+        ImageKind::Planet => tl("il pianeta"),
+        ImageKind::Saturn => tl("Saturno con gli anelli"),
+        ImageKind::FullDisk => tl("il disco"),
+        ImageKind::Surface => tl("l'immagine"),
+    };
+    let measured = analysis.psf_sigma.filter(|_| kind == analysis.kind);
+    let core = analysis.spectral.and(detail_cutoff(analysis));
+    let mut deconv = vec![match (core, measured) {
+        (Some(cutoff), limb) => {
+            let (fwhm, beta) = (2.3548 * blur_core(kind, analysis), moffat_beta(kind, analysis));
+            let limb = limb.map_or(String::new(), |m| {
+                tr!(" Il bordo del disco darebbe σ {m:.1} px, ma è allargato dall'oscuramento al bordo e dalle ali del seeing: una PSF così larga trasformerebbe i dettagli in macchie e contorni.", " The disk edge would give σ {m:.1} px, but it is widened by limb darkening and the seeing wings: a PSF that wide would turn details into blotches and outlines.")
+            });
+            tr!("PSF di Moffat, FWHM {fwhm:.1} px, β {beta:.1}: il nucleo viene dallo spettro (il dettaglio finisce a un periodo di {:.1} px), le ali larghe sono quelle tipiche del seeing.{limb}", "Moffat PSF, FWHM {fwhm:.1} px, β {beta:.1}: the core comes from the spectrum (detail ends at a period of {:.1} px), the broad wings are typical of seeing.{limb}",
+                1.0 / cutoff
+            )
+        }
+        (None, measured) => match measured {
+            Some(m) => tr!("PSF gaussiana σ {sigma:.2} px: l'85 % della sfocatura misurata sul bordo del disco (σ {m:.2} px). È un po' più piccola apposta: una PSF troppo grande crea aloni, una troppo piccola rende solo meno nitido.", "Gaussian PSF σ {sigma:.2} px: 85 % of the blur measured at the disk edge (σ {m:.2} px). It is a little smaller on purpose: a PSF that is too large creates halos, one that is too small just sharpens less."
+            ),
+            None => tr!("PSF gaussiana σ {sigma:.2} px: valore tipico per questo tipo di immagine. La sfocatura non si è potuta misurare (serve un disco rotondo con il bordo netto).", "Gaussian PSF σ {sigma:.2} px: typical value for this kind of image. The blur could not be measured (a round disk with a sharp edge is needed)."),
+        },
+    }];
+    let structure = deconv_structure(kind, analysis);
+    if let (None, Psf::Moffat { fwhm, beta }) = (core, structure.psf) {
+        deconv.push(tr!("PSF di Moffat (FWHM {fwhm:.1} px, β {beta:.1}): il profilo del bordo ha ali più larghe di una gaussiana, tipiche del seeing turbolento; una gaussiana le correggerebbe poco.", "Moffat PSF (FWHM {fwhm:.1} px, β {beta:.1}): the edge profile has wings broader than a Gaussian, typical of turbulent seeing; a Gaussian would correct them poorly."
+        ));
+    }
+    if structure.color == ColorMode::Rgb {
+        let [r, g, b] = structure.channel_scale;
+        deconv.push(tr!("Una PSF per canale (rosso ×{r:.2}, verde ×{g:.2}, blu ×{b:.2}): la sfocatura misurata sul bordo è diversa nei tre colori.", "One PSF per channel (red ×{r:.2}, green ×{g:.2}, blue ×{b:.2}): the blur measured at the edge differs between the three colours."));
+    }
+    deconv.push(tl("Richardson–Lucy con accelerazione Biggs–Andrews: il metodo di riferimento per le immagini planetarie; raggiunge la stessa qualità con molte meno iterazioni.").into());
+    deconv.push(tl("Arresto automatico: le iterazioni sono un massimo; si ferma quando l'immagine è ricostruita fino al livello del rumore misurato, oltre il quale amplificherebbe solo rumore.").into());
+    if structure.deringing > 0.0 {
+        deconv.push(tl("Anti-ringing a metà: sul bordo e nel cielo la stima non può allontanarsi troppo dall'immagine osservata, così gli anelli non si formano durante le iterazioni.").into());
+    }
+    deconv.push(match kind {
+        ImageKind::Saturn => tr!("Regolarizzazione TV {:.4}, un po' più alta: la divisione di Cassini e i bordi degli anelli creano facilmente aloni.", "TV regularisation {:.4}, a little higher: the Cassini division and the ring edges easily create halos.", b.tv_lambda),
+        ImageKind::FullDisk => tr!("Regolarizzazione TV {:.4}, bassa: il bordo netto del disco sul cielo nero va trattato con prudenza ma senza appiattire i crateri.", "TV regularisation {:.4}, low: the sharp disk edge against the black sky needs care but without flattening the craters.", b.tv_lambda),
+        _ => tr!("Regolarizzazione TV {:.4}: limita gli aloni sui bordi senza appiattire i dettagli.", "TV regularisation {:.4}: limits halos on edges without flattening detail.", b.tv_lambda),
+    });
+
+    let w = wavelet_structure(kind, analysis, scales);
+    let coarsest = w.scale(w.layers.len() - 1);
+    let mut wavelet = vec![tr!("{} livelli: la scala più grossa ({coarsest:.0} px) è circa un decimo della dimensione del soggetto ({:.0} px). Livelli più grandi cambierebbero solo la forma generale di {what}.", "{} levels: the coarsest scale ({coarsest:.0} px) is about a tenth of the subject’s size ({:.0} px). Larger levels would only change the overall shape of {what}.",
+        w.layers.len(),
+        analysis.subject_size
+    )];
+    if w.scale_mode == ScaleMode::Free {
+        let optical = analysis.optics.map(|o| o.cutoff);
+        wavelet.push(match (analysis.spectral, optical) {
+            (Some(sp), Some(o)) if o < sp.cutoff => tr!("Primo livello {:.2} px: lo strumento non può risolvere dettagli più fini di un periodo di {:.1} px (limite di diffrazione), anche se lo spettro arriverebbe a {:.1} px: quello che c'è oltre è rumore. Più fine del primo livello c'è solo grana, che viene soltanto ripulita.", "First level {:.2} px: the instrument cannot resolve details finer than a period of {:.1} px (diffraction limit), even though the spectrum would reach {:.1} px: whatever lies beyond is noise. Finer than the first level there is only grain, which is merely cleaned.",
+                w.first_scale,
+                1.0 / o,
+                1.0 / sp.cutoff
+            ),
+            (Some(sp), _) => tr!("Primo livello {:.2} px: lo spettro dell'immagine mostra che il dettaglio vero finisce intorno a un periodo di {:.1} px, dove il segnale scende sotto il rumore. Il primo livello è centrato lì; quello che è più fine è solo grana e viene soltanto ripulito, mai reso più nitido.", "First level {:.2} px: the image's spectrum shows that real detail ends around a period of {:.1} px, where the signal drops below the noise. The first level is centred there; anything finer is only grain and is merely cleaned, never sharpened.",
+                w.first_scale,
+                1.0 / sp.cutoff
+            ),
+            (None, Some(o)) => tr!("Primo livello {:.2} px, dallo strumento: il limite di diffrazione è un periodo di {:.1} px; lo spettro dell'immagine non si è potuto misurare.", "First level {:.2} px, from the equipment: the diffraction limit is a period of {:.1} px; the image's spectrum could not be measured.", w.first_scale, 1.0 / o),
+            (None, None) => tr!("Primo livello {:.2} px, dalla sfocatura (σ {sigma:.1} px): lo spettro dell'immagine non si è potuto misurare.", "First level {:.2} px, from the blur (σ {sigma:.1} px): the image's spectrum could not be measured.", w.first_scale),
+        });
+        wavelet.push(tl("Scale libere: ogni livello raddoppia la scala del precedente partendo da una dimensione qualsiasi, non per forza da 1 px. Sulle immagini di prova danno un risultato più fedele delle scale classiche 1·2·4·8.").into());
+    } else {
+        wavelet.push(if w.base_step == 2 {
+            tr!("Passo iniziale 2 px: l'immagine è sovracampionata (σ {sigma:.1} px), quindi un primo livello da 1 px conterrebbe solo rumore.", "Initial step 2 px: the image is oversampled (σ {sigma:.1} px), so a first level of 1 px would hold only noise.")
+        } else {
+            tr!("Passo iniziale 1 px: con una sfocatura di σ {sigma:.1} px il dettaglio più fine arriva quasi al singolo pixel.", "Initial step 1 px: with a blur of σ {sigma:.1} px the finest detail reaches almost the single pixel.")
+        });
+        wavelet.push(match w.kernel {
+            crate::wavelet::WaveletKernel::Linear => tl("Kernel lineare: l'immagine è sottocampionata (σ < 1 px) e serve una risposta più stretta.").into(),
+            _ => tl("Kernel B3-spline: liscio e isotropo, non introduce artefatti in nessuna direzione (Starck & Murtagh).").into(),
+        });
+        wavelet.push(tl("Progressione diadica (1·2·4·8…): ogni livello raddoppia la scala, così pochi livelli coprono tutte le dimensioni dei dettagli.").into());
+    }
+
+    let noise = auto_noise(kind, analysis, 1.0);
+    let mut denoise = vec![match noise.method {
+        NoiseMethod::Planetary => tl("Metodo Pianeti: il rumore è una grana fine sopra dettagli morbidi; toglierlo dalle 3 scale più fini lascia intatte bande e festoni.").to_string(),
+        NoiseMethod::Lunar => tl("Metodo Luna e Sole: crateri, ombre e granulazione hanno bordi netti; il filtro bilaterale media solo pixel simili e non li ammorbidisce.").to_string(),
+        NoiseMethod::Learned => tl("Metodo appreso: una piccola rete addestrata su stack simulati di pianeti, Luna e Sole riconosce il dettaglio dal suo aspetto e toglie solo il rumore.").to_string(),
+        NoiseMethod::Guided => tl("Metodo guidato dalla rete del rumore: stima quanto rumore c'è a ogni dimensione di dettaglio, nella luminosità e nel colore, e toglie solo quella parte.").to_string(),
+    }];
+    denoise.push(match kind {
+        ImageKind::Saturn => tl("Intensità ridotta: anche le divisioni sottili degli anelli sono dettaglio fine e non vanno cancellate.").into(),
+        ImageKind::Surface => tl("Pulizia del cielo a zero: in un'immagine di superficie non c'è cielo.").into(),
+        _ => tl("Pulizia del cielo alta: lo sfondo intorno al soggetto è nero e si può pulire a fondo.").into(),
+    });
+    denoise.push(if noise.method == NoiseMethod::Learned {
+        tr!("La rete riceve il rumore misurato sull'immagine (SNR {:.0}) e pulisce in proporzione; Intensità 1 = rumore preso com'è.", "The network is given the noise measured on the image (SNR {:.0}) and cleans in proportion; Strength 1 = the noise as measured.", analysis.snr)
+    } else {
+        tr!("L'intensità tiene conto del rapporto segnale/rumore misurato (SNR {:.0}): più l'immagine è rumorosa, più la pulizia è forte.", "The strength takes the measured signal-to-noise ratio into account (SNR {:.0}): the noisier the image, the stronger the cleaning.", analysis.snr)
+    });
+
+    let bxt = vec![tr!("Diametro PSF {:.1} px: è la FWHM della sfocatura misurata (2,355 × σ). La stima automatica di BlurXTerminator usa le stelle, che in queste immagini non ci sono.", "PSF diameter {:.1} px: this is the FWHM of the measured blur (2.355 × σ). BlurXTerminator’s automatic estimate uses stars, which these images do not have.",
+        (2.3548 * blur_core(kind, analysis)).clamp(0.5, 8.0)
+    )];
+    let dering = vec![
+        tl("Non cerca l'anello da solo: dipingilo con il pennello, largo più o meno quanto l'anello. Sotto la pennellata misura quanto è largo e dove sta, e lo riempie fino al livello di ciò che ha accanto.").into(),
+        tl("Un bordo netto (il lembo, l'orlo di un cratere), una banda più larga dell'anello e tutto ciò che sta fuori dalla pennellata non vengono toccati.").into(),
+    ];
+    Explanation { deconv, wavelet, denoise, bxt, dering }
+}
+
+/// Apply the structural settings for `kind` to `current`, keeping the user's simple settings
+/// (sharpening amounts, strengths), on/off choices and kind of wavelet scales.
+pub fn restructure(kind: ImageKind, analysis: &Analysis, current: &Pipeline) -> Pipeline {
+    let auto = auto_pipeline(kind, analysis);
+    let wavelet = wavelet_structure(kind, analysis, current.wavelet.params.scale_mode);
+    let structure = Pipeline {
+        deconv: Module::on(deconv_structure(kind, analysis)),
+        wavelet: Module::on(wavelet),
+        smart: Module::on(smart_structure(kind, analysis)),
+        dering: Module::on(dering_structure(kind, analysis)),
+        ..auto
+    };
+    with_structure(current, &structure)
+}
+
+/// The structural settings back to generic values (nothing taken from the image), keeping the
+/// user's amounts and on/off choices: "impostazioni avanzate automatiche" switched off.
+pub fn generic_structure(current: &Pipeline) -> Pipeline {
+    with_structure(current, &Pipeline::default())
+}
+
+/// `current` with the structural settings of `structure` (the kind of wavelet scales stays the
+/// user's).
+fn with_structure(current: &Pipeline, structure: &Pipeline) -> Pipeline {
+    let mut p = current.clone();
+    let (d, s) = (&mut p.deconv.params, &structure.deconv.params);
+    (d.algorithm, d.psf, d.accelerate, d.tv_lambda, d.color, d.channel_scale) = (s.algorithm, s.psf, s.accelerate, s.tv_lambda, s.color, s.channel_scale);
+    let (w, s) = (&mut p.wavelet.params, &structure.wavelet.params);
+    (w.kernel, w.base_step, w.first_scale) = (s.kernel, s.base_step, s.first_scale);
+    (w.noise_adaptive, w.edge_protection) = (s.noise_adaptive, s.edge_protection);
+    w.layers.resize(s.layers.len(), WaveletLayer::default());
+    p.denoise.params.method = structure.denoise.params.method;
+    p.bxt.params.psf_diameter = structure.bxt.params.psf_diameter;
+    let (m, s) = (&mut p.smart.params, &structure.smart.params);
+    (m.cutoff, m.peak, m.limb_protection, m.limb_width, m.include_sky) = (s.cutoff, s.peak, s.limb_protection, s.limb_width, s.include_sky);
+    // What the learned models answer for this image (the chosen curve stays the user's).
+    (m.learned, m.learned_strength, m.learned_nights) = (s.learned.clone(), s.learned_strength, s.learned_nights.clone());
+    if m.night.is_some_and(|n| !m.learned_nights.iter().any(|q| q.0 == n)) {
+        m.night = None;
+    }
+    p.align.params = structure.align.params;
+    let (own, d) = (&mut p.dering.params, &structure.dering.params);
+    (own.radius, own.edges, own.region) = (d.radius, d.edges, d.region);
+    p
+}

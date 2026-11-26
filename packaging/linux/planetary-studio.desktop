@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Planetary Studio
+Comment=Planetary image processing and sharpening
+Exec=planetary-studio
+Icon=planetary-studio
+Categories=Graphics;Science;Astronomy;
+Terminal=false

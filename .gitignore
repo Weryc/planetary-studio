@@ -1,0 +1,16 @@
+/target
+.DS_Store
+**/.DS_Store
+/Immagini_test
+.venv/
+/_archivio
+# Lavoro locale, non pubblicato
+/CLAUDE.md
+/.claude
+/docs/ARCHITETTURA.md
+/docs/STACKING_REPORT.md
+/docs/storia
+/crates/ps-train
+/crates/ps-io/examples
+/crates/ps-core/examples
+**/*_tests.rs
